@@ -1064,3 +1064,22 @@ describe("searchTokens: a slash between letters separates words (h144-search-3)"
     );
   });
 });
+
+// h191: the heading follows the order shown (the newest-first order says "en yeni", never "en ilgili").
+describe("archiveHeading in the newest-first order (h191)", () => {
+  it("page 1: 'Arşivden: en yeni 24 sonuç' when the page is full, the plain count otherwise", () => {
+    expect(archiveHeading(24, true, 1, "yeni")).toBe("Arşivden: en yeni 24 sonuç");
+    expect(archiveHeading(5, false, 1, "yeni")).toBe("Arşivden: 5 sonuç");
+  });
+
+  it("a later page names its page: 'Arşivden: en yeni sonuçlar (2. sayfa)'", () => {
+    expect(archiveHeading(24, true, 2, "yeni")).toBe("Arşivden: en yeni sonuçlar (2. sayfa)");
+    expect(archiveHeading(7, false, 4, "yeni")).toBe("Arşivden: en yeni sonuçlar (4. sayfa)");
+  });
+
+  it("no sort, null and undefined are the ranked wording, unchanged", () => {
+    expect(archiveHeading(24, true, 1, null)).toBe("Arşivden: en ilgili 24 sonuç");
+    expect(archiveHeading(24, true, 2, null)).toBe("Arşivden: en ilgili sonuçlar (2. sayfa)");
+    expect(archiveHeading(24, true, 1, undefined)).toBe(archiveHeading(24, true));
+  });
+});

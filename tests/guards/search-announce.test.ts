@@ -141,9 +141,12 @@ describe("src/app/page.tsx: the search result live region", () => {
     expect(homeFeed).toContain("için {resultPhrase}");
     // h170-roadmap-1: a later archive page (?arsiv=N, N >= 2) names its page with archivePagePhrase (the same
     // helper file as the live region's sentence) instead of a count; page 1 is resultCountPhrase as before.
+    // h191: both helpers also take the order SHOWN (`shownSort`: "yeni" says "en yeni", null keeps "en ilgili"), the
+    // same value searchStatusText gets as `sort`, so the visible line and the live region cannot word the order differently.
     expect(homeFeed).toMatch(
-      /const resultPhrase =\s*archivePage > 1\s*\? archivePagePhrase\(archivePage\)\s*: resultCountPhrase\(\s*resultCount,\s*view\.archiveCappedTotal && !view\.archiveUnavailable,?\s*\);/,
+      /const resultPhrase =\s*archivePage > 1\s*\? archivePagePhrase\(archivePage, shownSort\)\s*: resultCountPhrase\(\s*resultCount,\s*view\.archiveCappedTotal && !view\.archiveUnavailable,\s*shownSort,?\s*\);/,
     );
+    expect(homeFeed).toContain("sort: shownSort,");
     expect(homeFeed).not.toContain("formatCountTr(");
     expect(homeFeed).not.toContain("için sonuçlar");
   });

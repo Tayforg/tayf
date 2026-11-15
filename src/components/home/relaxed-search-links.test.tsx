@@ -161,8 +161,8 @@ function textOf(node: unknown): string {
   return "";
 }
 
-function mount(words: readonly string[] = WORDS, targetId = FEED_ID) {
-  const app = new rt.Runtime(() => RelaxedSearchLinks({ words, targetId }));
+function mount(words: readonly string[] = WORDS, targetId = FEED_ID, sort?: "yeni" | null) {
+  const app = new rt.Runtime(() => RelaxedSearchLinks({ words, targetId, ...(sort === undefined ? {} : { sort }) }));
   app.render();
   const tree = () => app.outputs[app.outputs.length - 1];
   const links = (): { type: unknown; props: LinkProps }[] =>
@@ -459,7 +459,8 @@ describe("relaxed-search-links.tsx source", () => {
 
   it("keeps the public client graph light: no cn, no tailwind-merge, no ui primitives", () => {
     const specs = importSpecifiers(src).sort();
-    expect(specs).toEqual(["./clear-search-link", "next/link", "next/navigation", "react"]);
+    // h191: the one new module is search-sort, a pure constant and a type (no cn, no ui primitive, no network)
+    expect(specs).toEqual(["./clear-search-link", "@/lib/search/search-sort", "next/link", "next/navigation", "react"]);
     for (const spec of specs) {
       expect(spec).not.toContain("utils");
       expect(spec).not.toContain("tailwind-merge");
@@ -496,5 +497,55 @@ describe("page.tsx wiring", () => {
   it("renders the chips with the feed's id, once, and keeps both ClearSearchLink uses", () => {
     expect(pageSrc.split("<RelaxedSearchLinks words={words} targetId={HOME_FEED_ID} />")).toHaveLength(2);
     expect(pageSrc.split("<ClearSearchLink targetId={HOME_FEED_ID} />")).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h191: in the newest-first order (?sirala=yeni) a chip keeps the order: /?q=word&sirala=yeni. Without it (or with any
+// other value) the chip is exactly what it was.
+// ---------------------------------------------------------------------------
+
+describe("RelaxedSearchLinks: the newest-first order (h191)", () => {
+  it("sort='yeni': every chip keeps sirala=yeni after the word", () => {
+    const view = mount(["emekli", "yasası", "a b"], FEED_ID, "yeni");
+    expect(view.links().map((l) => l.props.href)).toEqual([
+      "/?q=emekli&sirala=yeni",
+      "/?q=yasas%C4%B1&sirala=yeni",
+      "/?q=a+b&sirala=yeni",
+    ]);
+  });
+
+  it("no sort, null and an unknown value leave the chips exactly as they were", () => {
+    const plain = mount().links().map((l) => l.props.href);
+    expect(plain).toEqual(WORDS.map((w) => `/?q=${w}`));
+    expect(mount(WORDS, FEED_ID, null).links().map((l) => l.props.href)).toEqual(plain);
+    expect(mount(WORDS, FEED_ID, "relevance" as never).links().map((l) => l.props.href)).toEqual(plain);
+  });
+
+  it("a word cannot add or override a parameter, with or without the sort", () => {
+    const view = mount(["a&sirala=yeni", "b&arsiv=9", "c#d"], FEED_ID, "yeni");
+    for (const link of view.links()) {
+      const url = new URL(link.props.href, "https://tayf.test");
+      expect(url.hash).toBe("");
+      expect([...url.searchParams.keys()]).toEqual(["q", "sirala"]);
+      expect(url.searchParams.get("sirala")).toBe("yeni");
+    }
+    const plain = mount(["a&sirala=yeni"]);
+    expect([...new URL(plain.links()[0]!.props.href, "https://tayf.test").searchParams.keys()]).toEqual(["q"]);
+  });
+
+  it("the chip class, prefetch and scroll are the same in both orders", () => {
+    const a = mount(WORDS, FEED_ID, "yeni").links();
+    const b = mount().links();
+    expect(a.map((l) => l.props.className)).toEqual(b.map((l) => l.props.className));
+    for (const link of a) {
+      expect(link.props.prefetch).toBe(false);
+      expect(link.props.scroll).toBe(false);
+    }
+  });
+
+  it("page.tsx renders the plain chips element exactly as before for the ranked order and passes sort='yeni' in the other", () => {
+    expect(pageSrc.split("<RelaxedSearchLinks words={words} targetId={HOME_FEED_ID} />")).toHaveLength(2);
+    expect(pageSrc).toContain('<RelaxedSearchLinks words={words} targetId={HOME_FEED_ID} sort="yeni" />');
   });
 });

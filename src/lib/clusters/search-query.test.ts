@@ -61,6 +61,12 @@ const fixture = vi.hoisted(() => ({
   v2Ids: [] as string[],
   v2Error: null as { message: string; code?: string } | null,
   v2Throws: false,
+  // h191: the newest-first order (?sirala=yeni) calls search_cluster_ids_new (migration 215). Its calls are recorded apart
+  // from `rpcCalls` and `v2Calls`, so every existing assertion on the ranked functions stays as it was.
+  newCalls: [] as unknown[],
+  newIds: [] as string[],
+  newError: null as { message: string; code?: string } | null,
+  newThrows: false,
   // While `hold` is true every search_cluster_ids call returns a pending
   // promise that the test settles through its deferred (in-flight cap,
   // single-flight and shed tests).
@@ -129,6 +135,21 @@ const supabaseFake = await vi.hoisted(async () => {
         if (fixture.v2Error) return { data: null, error: fixture.v2Error };
         return { data: fixture.v2Ids.map((id) => ({ id })), error: null };
       },
+      search_cluster_ids_new: (args: unknown) => {
+        fixture.newCalls.push(args);
+        if (fixture.hold) {
+          return new Promise<{ data: unknown; error: null }>((resolve, reject) => {
+            fixture.deferreds.push({
+              args,
+              succeed: () => resolve({ data: fixture.newIds.map((id) => ({ id })), error: null }),
+              fail: (err) => reject(err),
+            });
+          });
+        }
+        if (fixture.newThrows) throw new Error("rpc connection reset");
+        if (fixture.newError) return { data: null, error: fixture.newError };
+        return { data: fixture.newIds.map((id) => ({ id })), error: null };
+      },
     },
   });
 });
@@ -183,6 +204,10 @@ beforeEach(() => {
   fixture.v2Ids = [];
   fixture.v2Error = null;
   fixture.v2Throws = false;
+  fixture.newCalls = [];
+  fixture.newIds = [];
+  fixture.newError = null;
+  fixture.newThrows = false;
   fixture.hold = false;
   fixture.deferreds = [];
   feedHealth.getZoneFeedHealth.mockReset();
@@ -2494,10 +2519,15 @@ describe("searchClusters: archive pages (h170-roadmap-1)", () => {
     });
 
     it("each cached function keeps exactly one literal cacheLife per outcome, after the attempt, and cacheTag first", () => {
-      expect(SOURCE.split('cacheLife("cluster-feed")').length - 1).toBe(2);
-      expect(SOURCE.split('cacheLife("minutes")').length - 1).toBe(2);
-      expect(SOURCE.split("cacheTag(\"clusters-search\")").length - 1).toBe(2);
-      for (const name of ["cachedSearchClusters(key: string)", "cachedSearchClustersPage(key: string, page: number)"]) {
+      // h191: the newest-first order (?sirala=yeni) is the third cache function; the two above are as they were
+      expect(SOURCE.split('cacheLife("cluster-feed")').length - 1).toBe(3);
+      expect(SOURCE.split('cacheLife("minutes")').length - 1).toBe(3);
+      expect(SOURCE.split("cacheTag(\"clusters-search\")").length - 1).toBe(3);
+      for (const name of [
+        "cachedSearchClusters(key: string)",
+        "cachedSearchClustersPage(key: string, page: number)",
+        "cachedSearchClustersNewest(key: string, page: number)",
+      ]) {
         const at = SOURCE.indexOf(name);
         const end = SOURCE.indexOf("\n}\n", at);
         const body = SOURCE.slice(at, end);
@@ -2588,6 +2618,346 @@ describe("searchClusters: archive pages (h170-roadmap-1)", () => {
       }
       fixture.v2Throws = false;
       await expect(searchClusters("eta", 2)).resolves.toMatchObject({ ok: true });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h191: ?sirala=yeni. The newest literal-title matches, newest first, one page per call to migration 215's
+// search_cluster_ids_new. Ranked mode (no third argument) is untouched: the calls, the cache functions and the
+// results are the ones the describe blocks above pin.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters: the newest-first order (?sirala=yeni, h191)", () => {
+  type NewArgs = { p_variants: string[]; p_folded: string; p_limit: number; p_offset: number };
+  const newAt = (i: number) => fixture.newCalls[i] as NewArgs;
+  const ids = (n: number, prefix = "c") => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+  const rowsFor = (list: string[]) =>
+    list.map((id) => mkRow({ id, members: [{ id: `a-${id}`, sourceId: "s1" }] }));
+
+  describe("which values select it", () => {
+    it("only the exact value 'yeni' calls search_cluster_ids_new", async () => {
+      await searchClusters("deprem", 1, "yeni");
+      expect(fixture.newCalls).toHaveLength(1);
+      expect(fixture.rpcCalls).toEqual([]);
+      expect(fixture.v2Calls).toEqual([]);
+    });
+
+    it("anything else is the ranked order: no value, undefined, an unknown string, another case, an empty string, an array, null", async () => {
+      const values: unknown[] = [undefined, "relevance", "YENI", "Yeni", "yeni ", " yeni", "yeni2", "", ["yeni"], ["yeni", "x"], null, 1, true];
+      for (const value of values) {
+        fixture.rpcCalls = [];
+        fixture.newCalls = [];
+        await searchClusters("deprem", 1, value as never);
+        expect(fixture.newCalls, JSON.stringify(value)).toEqual([]);
+        expect(fixture.rpcCalls, JSON.stringify(value)).toHaveLength(1);
+      }
+    });
+
+    it("the same holds on a later page: an unknown order calls search_cluster_ids_v2, never the new function", async () => {
+      await searchClusters("deprem", 2, "relevance" as never);
+      expect(fixture.newCalls).toEqual([]);
+      expect(fixture.v2Calls).toHaveLength(1);
+    });
+  });
+
+  describe("every page is one call to search_cluster_ids_new", () => {
+    it("page 1: ONE call with page 1's typed variants and folded text, p_limit 24 and p_offset 0", async () => {
+      await searchClusters("IŞIK", 1, "yeni");
+      expect(fixture.newCalls).toEqual([
+        { p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24, p_offset: 0 },
+      ]);
+      expect(fixture.rpcCalls).toEqual([]);
+      expect(fixture.v2Calls).toEqual([]);
+    });
+
+    it("pages 1 to 4 send p_offset (N - 1) * 24: 0, 24, 48 and 72, always p_limit 24", async () => {
+      for (const page of [1, 2, 3, 4]) await searchClusters("deprem", page, "yeni");
+      expect(fixture.newCalls.map((c) => (c as NewArgs).p_offset)).toEqual([0, 24, 48, 72]);
+      expect(fixture.newCalls.map((c) => (c as NewArgs).p_limit)).toEqual([24, 24, 24, 24]);
+    });
+
+    it("a page past the last is the last page, and a page that is not a whole number from 1 is page 1", async () => {
+      for (const page of [5, 9, 1000, Number.MAX_SAFE_INTEGER]) {
+        fixture.newCalls = [];
+        await searchClusters("deprem", page, "yeni");
+        expect(newAt(0).p_offset, String(page)).toBe(72);
+      }
+      for (const page of [0, -1, Number.NaN, 1.5, Number.NEGATIVE_INFINITY]) {
+        fixture.newCalls = [];
+        await searchClusters("deprem", page, "yeni");
+        expect(newAt(0).p_offset, String(page)).toBe(0);
+      }
+    });
+
+    it("sends exactly the typed arguments the ranked page 1 sends (the alias expansion, the canonical query)", async () => {
+      for (const q of ["Özel'den  Şişli", "Erdoğan’ın", "enflasyon", "AKP", "afyon"]) {
+        fixture.rpcCalls = [];
+        fixture.newCalls = [];
+        await searchClusters(q, 1);
+        const typed = fixture.rpcCalls[0] as { p_variants: string[]; p_folded: string };
+        await searchClusters(q, 1, "yeni");
+        expect(newAt(0).p_variants, q).toEqual(typed.p_variants);
+        expect(newAt(0).p_folded, q).toBe(typed.p_folded);
+      }
+    });
+
+    it("makes no sibling and no locative call: a possessive, a bare vowel-final noun and a case suffix are the one typed call", async () => {
+      for (const q of ["elektrik zammı", "emlak vergisi", "tarla", "bolu kaza", "imamoğluna"]) {
+        fixture.rpcCalls = [];
+        fixture.newCalls = [];
+        await searchClusters(q, 1, "yeni");
+        expect(fixture.rpcCalls, q).toEqual([]);
+        expect(fixture.newCalls, q).toHaveLength(1);
+        expect(newAt(0).p_folded, q).toBe(foldTr(canonicalSearchQuery(q)));
+      }
+    });
+
+    it("a too-short query is no search in this order either: no call, no slot, no cache entry", async () => {
+      for (const q of ["", "a", "!!", "  "]) {
+        await expect(searchClusters(q, 1, "yeni"), q).resolves.toEqual({ ok: true, bundles: [] });
+      }
+      expect(fixture.newCalls).toEqual([]);
+      expect(cacheTag).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the result", () => {
+    it("carries newest: true, hydrates the ids in the RPC's order with the embed select, and applies the feed-health gate once", async () => {
+      fixture.newIds = ["b", "c", "a"];
+      fixture.data = rowsFor(["a", "b", "c"]);
+      const result = await searchClusters("deprem", 1, "yeni");
+      const state = fixture.lastState as BuilderState;
+      expect(state.table).toBe("clusters");
+      expect(state.in).toEqual([{ col: "id", vals: ["b", "c", "a"] }]);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.newest).toBe(true);
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["b", "c", "a"]);
+      expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    });
+
+    it("capped is true when the call returned a full page of 24 ids (counted before the visibility filter), false for fewer", async () => {
+      fixture.newIds = ids(24);
+      fixture.data = [...rowsFor(ids(23)), mkRow({ id: "c23", members: [] })];
+      const full = await searchClusters("deprem", 2, "yeni");
+      if (!full.ok) throw new Error("expected ok");
+      expect(full.capped).toBe(true);
+      expect(full.bundles).toHaveLength(23);
+      fixture.newIds = ids(23);
+      fixture.data = rowsFor(ids(23));
+      const short = await searchClusters("enflasyon", 3, "yeni");
+      if (!short.ok) throw new Error("expected ok");
+      expect(short.capped).toBe(false);
+    });
+
+    it("page 1 reports typedFull when it was full (the pager of page 1 reads it), later pages do not", async () => {
+      fixture.newIds = ids(24);
+      fixture.data = rowsFor(ids(24));
+      const first = await searchClusters("deprem", 1, "yeni");
+      const later = await searchClusters("deprem", 2, "yeni");
+      if (!first.ok || !later.ok) throw new Error("expected ok");
+      expect(first.typedFull).toBe(true);
+      expect(later).not.toHaveProperty("typedFull");
+      fixture.newIds = ids(23);
+      fixture.data = rowsFor(ids(23));
+      const short = await searchClusters("enflasyon", 1, "yeni");
+      expect(short).not.toHaveProperty("typedFull");
+    });
+
+    it("an empty page is ok with no bundles, capped false, newest true, and no embed read", async () => {
+      fixture.newIds = [];
+      await expect(searchClusters("deprem", 1, "yeni")).resolves.toEqual({ ok: true, bundles: [], capped: false, newest: true });
+      expect(fixture.lastState).toBeNull();
+    });
+
+    it("a ranked result never carries newest, and ranked page 1 is exactly what it was", async () => {
+      fixture.rpcIdsPerCall = [["c1"], ["c1"]];
+      fixture.data = rowsFor(["c1"]);
+      const ranked = await searchClusters("trafik cezası");
+      expect(ranked).not.toHaveProperty("newest");
+      expect(Object.keys(ranked).sort()).toEqual(["bundles", "capped", "ok"]);
+      expect(fixture.newCalls).toEqual([]);
+    });
+  });
+
+  describe("ranked mode is untouched", () => {
+    it("page 1 makes today's calls: the typed call and nothing else, with or without the explicit page", async () => {
+      await searchClusters("IŞIK");
+      await searchClusters("IŞIK", 1);
+      expect(fixture.rpcCalls).toEqual([
+        { p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24 },
+        { p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24 },
+      ]);
+      expect(fixture.newCalls).toEqual([]);
+      expect(fixture.v2Calls).toEqual([]);
+    });
+
+    it("a later page makes today's call to search_cluster_ids_v2", async () => {
+      await searchClusters("IŞIK", 2);
+      expect(fixture.v2Calls).toEqual([
+        { p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24, p_offset: 24 },
+      ]);
+      expect(fixture.newCalls).toEqual([]);
+    });
+
+    it("keeps its cache entry: one literal cacheLife per invocation, tag clusters-search", async () => {
+      await searchClusters("merhaba");
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+      expect(cacheTag).toHaveBeenCalledWith("clusters-search");
+    });
+  });
+
+  describe("search_cluster_ids_new missing or failing: the ranked order for that request, logged once, never a throw", () => {
+    const warns = () => vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
+
+    beforeEach(() => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.mocked(console.warn).mockRestore();
+    });
+
+    it("PGRST202 on page 1: the ranked page 1 answers (the typed call, ranked ids), with no newest flag, after ONE call to the new function", async () => {
+      fixture.newError = { message: "Could not find the function public.search_cluster_ids_new", code: "PGRST202" };
+      fixture.rpcIds = ["r1", "r2"];
+      fixture.data = rowsFor(["r1", "r2"]);
+      const result = await searchClusters("IŞIK", 1, "yeni");
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["r1", "r2"]);
+      expect(result).not.toHaveProperty("newest");
+      expect(fixture.newCalls).toHaveLength(1);
+      expect(fixture.rpcCalls[0]).toEqual({ p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24 });
+    });
+
+    it("PGRST202 on page 3: the ranked page 3 answers (search_cluster_ids_v2 at offset 48)", async () => {
+      fixture.newError = { message: "missing", code: "PGRST202" };
+      fixture.v2Ids = ["v1"];
+      fixture.data = rowsFor(["v1"]);
+      const result = await searchClusters("deprem", 3, "yeni");
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.bundles.map((b) => b.cluster.id)).toEqual(["v1"]);
+      expect(result).not.toHaveProperty("newest");
+      expect(fixture.v2Calls).toHaveLength(1);
+      expect((fixture.v2Calls[0] as { p_offset: number }).p_offset).toBe(48);
+    });
+
+    it("logs once for the fallback: one warning, without the reader's query", async () => {
+      fixture.newError = { message: "missing", code: "PGRST202" };
+      fixture.rpcIds = ["r1"];
+      fixture.data = rowsFor(["r1"]);
+      await searchClusters("gizli sorgu metni", 1, "yeni");
+      const lines = warns().filter((l) => l.includes("search-query"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("search_cluster_ids_new");
+      expect(lines[0]).not.toContain("gizli");
+    });
+
+    it("the fallback is memoised for 'minutes' only, so applying 215 heals it soon, and the answer is never cached for the feed window", async () => {
+      fixture.newError = { message: "missing", code: "PGRST202" };
+      fixture.rpcIds = ["r1"];
+      fixture.data = rowsFor(["r1"]);
+      await searchClusters("deprem", 1, "yeni");
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+      expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+      expect(cacheTag).toHaveBeenCalledWith("clusters-search");
+    });
+
+    it("any other error on the new function (a statement timeout) falls back the same way, and a thrown exception too", async () => {
+      fixture.newError = { message: "statement timeout", code: "57014" };
+      fixture.rpcIds = ["r1"];
+      fixture.data = rowsFor(["r1"]);
+      const timeout = await searchClusters("deprem", 1, "yeni");
+      expect(timeout.ok).toBe(true);
+      expect(timeout).not.toHaveProperty("newest");
+      expect(fixture.newCalls).toHaveLength(1);
+      fixture.newError = null;
+      fixture.newThrows = true;
+      const thrown = await searchClusters("enflasyon", 1, "yeni");
+      expect(thrown.ok).toBe(true);
+      expect(thrown).not.toHaveProperty("newest");
+    });
+
+    it("when the ranked read fails too the answer is { ok: false }, never a throw", async () => {
+      fixture.newError = { message: "missing", code: "PGRST202" };
+      fixture.rpcError = { message: "statement timeout", code: "57014" };
+      await expect(searchClusters("deprem", 1, "yeni")).resolves.toEqual({ ok: false });
+      fixture.v2Error = { message: "statement timeout", code: "57014" };
+      await expect(searchClusters("enflasyon", 2, "yeni")).resolves.toEqual({ ok: false });
+    });
+
+    it("a failing embed after a good id list is { ok: false } (the new function is not retried as a fallback)", async () => {
+      fixture.newIds = ["c1"];
+      fixture.error = { message: "embed down" };
+      await expect(searchClusters("deprem", 1, "yeni")).resolves.toEqual({ ok: false });
+      expect(fixture.rpcCalls).toEqual([]);
+    });
+  });
+
+  describe("cache key and load shape", () => {
+    const SOURCE = readFileSync(resolve(__dirname, "search-query.ts"), "utf8");
+
+    it("has a cache function of its own with the page in its key, so ranked page 1 keeps its one-argument key", () => {
+      expect(SOURCE).toContain("async function cachedSearchClustersNewest(key: string, page: number) {");
+      expect(SOURCE).toContain("cachedSearchClustersNewest(key, page)");
+      expect(SOURCE).toContain("async function cachedSearchClusters(key: string) {");
+    });
+
+    it("the same canonical query in the two orders is two searches; the same page in one order twice is one (single-flight per order and page)", async () => {
+      fixture.hold = true;
+      fixture.rpcIds = ["c1"];
+      fixture.newIds = ["n1"];
+      fixture.data = rowsFor(["c1", "n1"]);
+      const running = [
+        searchClusters("deprem", 1),
+        searchClusters("DEPREM!", 1, "yeni"),
+        searchClusters("deprem", 1, "yeni"),
+        searchClusters("deprem", 2, "yeni"),
+        searchClusters("deprem", 2, "yeni"),
+      ];
+      await tick();
+      expect(fixture.rpcCalls).toHaveLength(1);
+      expect(fixture.newCalls.map((c) => (c as NewArgs).p_offset)).toEqual([0, 24]);
+      fixture.hold = false;
+      for (const d of fixture.deferreds) d.succeed();
+      const results = await Promise.all(running);
+      expect(results.every((r) => r.ok)).toBe(true);
+    });
+
+    it("MAX_IN_FLIGHT_SEARCHES applies to this order: the 5th concurrent distinct search is shed with no RPC", async () => {
+      fixture.hold = true;
+      const running = ["alfan", "betan", "gaman", "deltan"].map((q) => searchClusters(q, 1, "yeni"));
+      await tick();
+      expect(fixture.newCalls).toHaveLength(4);
+      const tagCalls = vi.mocked(cacheTag).mock.calls.length;
+      await expect(searchClusters("epsilon", 1, "yeni")).resolves.toEqual({ ok: false });
+      await expect(searchClusters("epsilon", 1)).resolves.toEqual({ ok: false });
+      expect(fixture.newCalls).toHaveLength(4);
+      expect(vi.mocked(cacheTag).mock.calls).toHaveLength(tagCalls);
+      fixture.hold = false;
+      for (const d of fixture.deferreds) d.succeed();
+      await Promise.all(running);
+    });
+
+    it("releases the slot after success and after a failure", async () => {
+      fixture.newThrows = true;
+      fixture.rpcThrows = true;
+      for (const q of ["alfan", "betan", "gaman", "deltan", "epsilon", "zetan"]) {
+        await expect(searchClusters(q, 1, "yeni"), q).resolves.toEqual({ ok: false });
+      }
+      fixture.newThrows = false;
+      fixture.rpcThrows = false;
+      await expect(searchClusters("eta", 1, "yeni")).resolves.toMatchObject({ ok: true });
+    });
+
+    it("a successful read keeps the cluster-feed window (one literal cacheLife per invocation)", async () => {
+      fixture.newIds = ["c1"];
+      fixture.data = rowsFor(["c1"]);
+      await searchClusters("deprem", 2, "yeni");
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+      expect(cacheTag).toHaveBeenCalledWith("clusters-search");
     });
   });
 });

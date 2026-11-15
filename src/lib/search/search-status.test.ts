@@ -408,3 +408,48 @@ describe("searchTitle on a later archive page (h170-roadmap-1)", () => {
     expect(searchTitle(undefined, 2)).toBe("Arama");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h191: the wording follows the order shown. "en ilgili" (most relevant) is the ranked order's word; the newest-first
+// order (?sirala=yeni) says "en yeni". Ranked wording is what it always was.
+// ---------------------------------------------------------------------------
+
+describe("the newest-first wording (h191)", () => {
+  it("resultCountPhrase: 'en yeni 24 sonuç' when capped, the plain count otherwise; ranked is unchanged", () => {
+    expect(resultCountPhrase(24, true, "yeni")).toBe("en yeni 24 sonuç");
+    expect(resultCountPhrase(1234, true, "yeni")).toBe("en yeni 1.234 sonuç");
+    expect(resultCountPhrase(2, false, "yeni")).toBe("2 sonuç");
+    expect(resultCountPhrase(24, true, null)).toBe("en ilgili 24 sonuç");
+    expect(resultCountPhrase(24, true, undefined)).toBe(resultCountPhrase(24, true));
+  });
+
+  it("archivePagePhrase: 'en yeni sonuçların 2. sayfası'; ranked is unchanged", () => {
+    expect(archivePagePhrase(2, "yeni")).toBe("en yeni sonuçların 2. sayfası");
+    expect(archivePagePhrase(4, "yeni")).toBe("en yeni sonuçların 4. sayfası");
+    expect(archivePagePhrase(2, null)).toBe("en ilgili sonuçların 2. sayfası");
+    expect(archivePagePhrase(3)).toBe("en ilgili sonuçların 3. sayfası");
+  });
+
+  it("searchStatusText says 'en yeni' for the first page and the later pages, and is the old sentence without a sort", () => {
+    expect(searchStatusText({ q: "seçim", count: 26, capped: true, unavailable: false, sort: "yeni" })).toBe(
+      "“seçim” için en yeni 26 sonuç gösteriliyor.",
+    );
+    expect(searchStatusText({ q: "seçim", count: 26, capped: true, unavailable: false, archivePage: 2, sort: "yeni" })).toBe(
+      "“seçim” için en yeni sonuçların 2. sayfası gösteriliyor.",
+    );
+    expect(searchStatusText({ q: "seçim", count: 5, capped: false, unavailable: false, sort: "yeni" })).toBe("“seçim” için 5 sonuç bulundu.");
+    // h191 review ui-2: a zero in the newest order is not a ranked zero (the literal-title filter is stricter), so it says which order found nothing
+    expect(searchStatusText({ q: "seçim", count: 0, capped: false, unavailable: false, sort: "yeni" })).toBe(
+      "“seçim” için en yeni sıralamada sonuç bulunamadı. En alakalı sıralamayı deneyin.",
+    );
+    expect(searchStatusText({ q: "seçim", count: 0, capped: false, unavailable: false, sort: null })).toBe("“seçim” için sonuç bulunamadı.");
+    expect(searchStatusText({ q: "seçim", count: 0, capped: false, unavailable: false })).toBe("“seçim” için sonuç bulunamadı.");
+    // a failed search and a too-short query keep their own sentences in either order
+    expect(searchStatusText({ q: "seçim", count: 0, capped: false, unavailable: true, sort: "yeni" })).toBe("Arama şu an yanıt vermiyor.");
+    expect(searchStatusText({ q: "a", count: 0, capped: false, unavailable: false, sort: "yeni" })).toBe("En az 2 karakter yazın.");
+    expect(searchStatusText({ q: "seçim", count: 26, capped: true, unavailable: false })).toBe("“seçim” için en ilgili 26 sonuç gösteriliyor.");
+    expect(searchStatusText({ q: "seçim", count: 26, capped: true, unavailable: false, sort: null })).toBe(
+      searchStatusText({ q: "seçim", count: 26, capped: true, unavailable: false }),
+    );
+  });
+});
