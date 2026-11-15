@@ -732,17 +732,20 @@ describe("216 search_cluster_ids_new_content_words: access", () => {
   });
 });
 
-describe("216 search_cluster_ids_new_content_words: the app is not changed", () => {
-  it("the app still calls search_cluster_ids_new(p_variants, p_folded, p_limit, p_offset), with p_variants[1] the Turkish-lettered lower-cased query", () => {
+describe("216 search_cluster_ids_new_content_words: the app's call", () => {
+  it("the app calls search_cluster_ids_new(p_variants, p_folded, p_limit, p_offset), with p_variants[1] the Turkish-lettered lower-cased query (the typed spellings come first, h196-search-1)", () => {
     const source = readFileSync(SEARCH_QUERY_SOURCE, "utf8");
     const at = source.indexOf('rpc("search_cluster_ids_new"');
     expect(at, "the app's call").toBeGreaterThan(0);
     const call = source.slice(at, source.indexOf("});", at));
-    expect(call).toContain("p_variants: typed");
+    expect(call).toContain("p_variants: variants");
     expect(call).toContain("p_folded: folded");
     expect(call).toContain("p_limit: SEARCH_LIMIT");
     expect(call).toContain("p_offset: (page - 1) * SEARCH_LIMIT");
-    // typed = turkishQueryVariants(base): its first element is t.toLocaleLowerCase("tr")
+    // variants = newestSearchArguments(key): the typed spellings first, so p_variants[1] (the one sw reads) is still
+    // typed[0]; typed = turkishQueryVariants(base), whose first element is t.toLocaleLowerCase("tr")
+    expect(source).toContain("for (const v of [...typed, ...turkishQueryVariants(sibling)])");
+    expect(source).toContain("return { variants: typed, folded };");
     const turkish = readFileSync(resolve(ROOT, "src", "lib", "clusters", "turkish-query.ts"), "utf8");
     expect(turkish).toContain('t.toLocaleLowerCase("tr"),');
     expect(source).toContain("typed: turkishQueryVariants(base)");

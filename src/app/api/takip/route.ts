@@ -7,8 +7,8 @@ import { getTopicClusters, isTopicSlug } from "@/lib/clusters/topic-query";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import {
   formatZoneLine,
-  sourceCountHead,
   votingZoneCounts,
+  wireSourceCountHead,
 } from "@/lib/feeds/zone-line";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
@@ -171,6 +171,7 @@ function toItems(bundles: readonly ClusterBundle[]) {
     const counts = votingZoneCounts(b.sources);
     const sourceCount = effectiveCount(b);
     const lang = itemLang(b);
+    const languageIsolated = isLanguageIsolatedCluster(b.sources);
     return {
       id: b.cluster.id,
       title: b.cluster.title_tr,
@@ -178,13 +179,21 @@ function toItems(bundles: readonly ClusterBundle[]) {
       updatedAt: b.cluster.updated_at,
       sourceCount,
       isBlindspot: b.cluster.is_blindspot === true,
-      zoneLine: isLanguageIsolatedCluster(b.sources)
-        ? ENGLISH_ONLY_ZONE_LINE
-        : formatZoneLine(counts),
+      zoneLine: languageIsolated ? ENGLISH_ONLY_ZONE_LINE : formatZoneLine(counts),
       // The head every other zone-line surface prints in front of it: 'N
       // kaynak', or 'N kaynak (M sınıflandırılmış)' when only M of the N
-      // members vote, so the zone line next to it adds up.
-      countHead: sourceCountHead(sourceCount, counts),
+      // members vote, so the zone line next to it adds up. h196-counts-2: a wire
+      // redistribution counts its distinct texts while every classified member
+      // still votes, so M can exceed N; then the head names the votes ('7 kaynak
+      // · 13 sınıflandırılmış', as the embed, rozet and OG pill do) rather than
+      // printing '7 kaynak' beside a zone line that adds up to 13. An all-English
+      // cluster's zone line is the 'not compared' note (no tally to add up), so
+      // it keeps the plain head, like the embed's English-only legend.
+      countHead: wireSourceCountHead(
+        sourceCount,
+        counts,
+        b.isWireRedistribution === true && !languageIsolated,
+      ),
       // Only when 'en': a Turkish item's JSON keeps exactly its old keys.
       ...(lang === undefined ? {} : { lang }),
     };

@@ -9,6 +9,8 @@ import {
   canonicalSearchQuery,
   foldTr,
   holdsLocativeWitness,
+  holdsNegatedWord,
+  negatedSearchWords,
   searchFoldedSiblingParts,
   searchSiblingQuery,
   turkishQueryVariants,
@@ -55,6 +57,12 @@ import {
 // election and court rows of 'kazandı' ('tokat kaza' showed 5 such cards out of 6). The text is the embed's own
 // title_tr_neutral, title_tr and summary_tr (what search_tsv holds), the RPC arguments do not change, and typed
 // rows and the rows of the root-sibling call are never judged (turkish-query.ts, holdsLocativeWitness).
+// A NEGATED word is re-checked here too (h196-search-2, turkish-query.ts negatedSearchWords / holdsNegatedWord): the stem-fold
+// arm of the three RPCs admits a row that names it ('galatasaray -fenerbahçe' listed 5 Fenerbahçe headlines among 24, in both
+// orders: Postgres negates the over-cut lexeme 'fenerbah' and the stored stem is 'fenerbahce'). `hydrateBundles` drops a row
+// whose own text holds a negated word of 5 letters or more at a word start, on every page of both orders. A shorter negation
+// and a phrase stay with the database. The RPC arguments do not change, and the drops are not counted as `dropped`, so `capped`
+// and `typedFull` keep reading the RPC's id count.
 // An alias in the query (AKP <-> AK Parti, search-aliases.ts) is expanded into a
 // two-way websearch `or` for BOTH arguments, so 'AKP' and 'AK Parti' send the
 // same RPC call; the cache key below stays the canonical query.
@@ -85,11 +93,16 @@ import {
 // (211 not applied yet) is `{ ok: false, unavailablePage: true }`, memoised for `minutes` only.
 //
 // The newest-first order (h191, `?sirala=yeni`). `searchClusters(q, archivePage, "yeni")` reads EVERY archive page (1 to
-// ARCHIVE_MAX_PAGE) from migration 215's `search_cluster_ids_new` with page 1's typed `p_variants` and `p_folded`, `p_limit`
-// SEARCH_LIMIT and `p_offset` (page - 1) * SEARCH_LIMIT: the newest clusters whose display title literally holds the
-// query, newest first. It is ONE call (no sibling, no locative: a merged list has no offset to page by), so page 1 reports
-// `typedFull` when it was full, and the result carries `newest: true`, which is what the page words its headings and marks
-// its toggle by. Only the exact value "yeni" selects it; any other value, or none, is the ranked order above, whose calls,
+// ARCHIVE_MAX_PAGE) from migration 215's `search_cluster_ids_new` with `p_variants` and `p_folded` from
+// `newestSearchArguments`, `p_limit` SEARCH_LIMIT and `p_offset` (page - 1) * SEARCH_LIMIT: the newest clusters whose display
+// title literally holds the query, newest first. It is ONE call and every page sends the same list (a merged list has no
+// offset to page by, so there is never a second call): the typed spellings plus the root sibling's, folded as the root
+// (h196-search-1: 'elektrik zammı' and 'imamoğluna' found 0 stories on the typed spelling alone, the root finds 7 and 96).
+// The merge happens only when every sibling term is a word-start prefix of its typed term, because migration 216's lit_d is a
+// filter over p_folded (GEMINATE 'redd' -> 'ret' is the exception: 'reddi' stays typed-only). The merge never adds a row ahead
+// of a newer typed row (the order is updated_at desc), but an older typed hit can fall out of the 150-candidate window once the
+// root spelling widens it. The locative second call is not made in this order (replayed: no gain). Page 1 reports `typedFull` when it was full, and the result carries
+// `newest: true`, which is what the page words its headings and marks its toggle by. Only the exact value "yeni" selects it; any other value, or none, is the ranked order above, whose calls,
 // cache entries and results are not touched. The new order has a cache function of its own (`cachedSearchClustersNewest`,
 // the page is part of its key: at most 4 entries per query), so ranked page 1 keeps its one-argument key.
 // If the function is missing (PGRST202: 215 is not applied yet), errors or throws, that request is answered in the RANKED
@@ -168,15 +181,53 @@ function typedSearchArguments(key: string): { base: string; typed: string[]; fol
   };
 }
 
+// The newest-first order's arguments (h196-search-1): the typed spellings plus the ROOT sibling's, folded as the root,
+// but ONLY when every sibling term is a word-start prefix of its typed term. 'elektrik zammı' is stored under the stem of
+// 'zam' and 'imamoğluna' under 'imamoğlu', so the typed arguments alone found 0 stories where the root finds 7 and 96
+// ('elektrik zammı' 0 -> 7, 'imamoğluna' 0 -> 96, 'suriyede' 0 -> 81, 'kira zammı' 0 -> 6, replayed read-only on 2026-11-15).
+// The merge has a price, measured the same day: 'iran görüşmesi' 10 -> 60 rows over four pages, 6 of the 10 typed rows no
+// longer listed (all older than the oldest merged row: migration 216 keeps only the newest 150 survivors, and the root
+// spelling widens that window). One merged call is safe HERE and only here, with that limit: migration 216's q ORs
+// p_variants[1..6] and the order is updated_at desc, so the merge never adds a row ahead of a newer typed row (the ranked
+// order calls twice for that reason, 'karasu' flooding 'kara'); older typed hits can fall out of the 150-candidate window,
+// so the no-loss property holds only when each sibling term is a prefix of its typed term (the guard below) and the
+// 150-candidate window is not exhausted.
+// `p_folded` must be the SIBLING, because lit_d is a FILTER over it: every folded word must be a word-start prefix of the
+// display title ('zammi' would demand 'zamm', 'imamogluna' 'imamoglun'); the stop words read p_variants[1], the typed first
+// spelling, unchanged. That is also why the merge is refused when a sibling term is NOT a prefix of its typed term: GEMINATE
+// 'redd' -> 'ret' ('reddi' -> 'ret') would demand a title word starting with 'ret' and drop the stories holding 'reddi'
+// (replayed: 11 typed rows, 1 surviving the merge over pages 1-4), so 'reddi' stays typed-only, the old behaviour.
+// `searchSiblingQuery` is null for an operator, quoted, negated or alias query, which keep the typed arguments. Every page
+// 1 to 4 builds the same list from the same key, so a later page continues exactly page 1's.
+function siblingTermsArePrefixes(typedQuery: string, siblingQuery: string): boolean {
+  const typedTerms = foldTr(typedQuery).split(/\s+/).filter((t) => t !== "");
+  const siblingTerms = foldTr(siblingQuery).split(/\s+/).filter((t) => t !== "");
+  if (typedTerms.length !== siblingTerms.length) return false;
+  return siblingTerms.every((term, i) => (typedTerms[i] as string).startsWith(term));
+}
+
+function newestSearchArguments(key: string): { variants: string[]; folded: string } {
+  const { base, typed, folded } = typedSearchArguments(key);
+  const sibling = searchSiblingQuery(base);
+  if (sibling === null || !siblingTermsArePrefixes(base, sibling)) return { variants: typed, folded };
+  const variants: string[] = [];
+  for (const v of [...typed, ...turkishQueryVariants(sibling)]) {
+    if (!variants.includes(v)) variants.push(v);
+  }
+  return { variants: variants.slice(0, 6), folded: foldTr(sibling) };
+}
+
 // The ids' embed and bundles, shared by page 1 and the later pages: one feed-health read, one
 // `.in('id', ids)` embed select, the RPC's order, a cluster with no visible member left out.
 // `locIds` / `locTerms` are page 1's locative witness filter (h157-search-1); a later page passes
-// none. THROWS on a Supabase error. `dropped` = the locative rows the witness filter removed.
+// none. `negated` = the folded words the reader negated (`negatedSearchWords`, h196-search-2), [] for a query
+// with no such word. THROWS on a Supabase error. `dropped` = the locative rows the witness filter removed.
 async function hydrateBundles(
   supabase: ReturnType<typeof createReaderClient>,
   ids: string[],
   locIds: ReadonlySet<string>,
   locTerms: string[],
+  negated: readonly string[],
 ): Promise<{ bundles: ClusterBundle[]; dropped: number }> {
   // Same feed-health gate as politics-query.ts's fetchPoliticsClusters,
   // fetched once per search — so search-result cards (which render the
@@ -218,12 +269,26 @@ async function hydrateBundles(
           return false;
         });
 
+  // h196-search-2: a negated word ('galatasaray -fenerbahçe') is re-checked here, in every order and on every page.
+  // The stem-fold arm of the three RPCs admits a row that names the word (the negated lexeme is over-cut to
+  // 'fenerbah', the stored stem is 'fenerbahce'), and nothing else checked it. A row is dropped when its own text
+  // (title_tr_neutral, title_tr, summary_tr: what search_tsv holds) holds any negated word at a word start. These drops
+  // are NOT counted in `dropped`, which only drives the locative `capped` rule: `capped` and `typedFull` keep reading the
+  // RPC's id count, so the pager and the 'en ilgili N sonuç' label do not change. No negation, no per-row work.
+  const kept =
+    negated.length === 0
+      ? rows
+      : rows.filter((row) => {
+          const text = foldTr(`${row.title_tr_neutral ?? ""} ${row.title_tr ?? ""} ${row.summary_tr ?? ""}`);
+          return !negated.some((word) => holdsNegatedWord(text, word));
+        });
+
   // One clock read for the whole result: it ages every row's blindspot claim
   // (this body only runs inside the "use cache" attempt or after the request
   // scope on the live retry, so the read is allowed).
   const nowMs = Date.now();
   const bundles: ClusterBundle[] = [];
-  for (const row of rows) {
+  for (const row of kept) {
     const members = flattenClusterMembers(row);
     if (members.length === 0) continue;
     bundles.push(buildClusterBundle(row, members, health, nowMs).bundle);
@@ -328,7 +393,7 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   }
   if (ids.length === 0) return { bundles: [], capped: false };
 
-  const { bundles, dropped } = await hydrateBundles(supabase, ids, locIds, locTerms);
+  const { bundles, dropped } = await hydrateBundles(supabase, ids, locIds, locTerms, negatedSearchWords(key));
   // `capped` reads the page that remains, but only when the locative call was fully consumed: a dropped row turns
   // `capped` off only if the second call was neither a full page of its own nor left a new id unconsidered
   // (secondMayHaveMore false). Otherwise the list stays "capped" ("en ilgili N sonuc"), because the archive may
@@ -362,13 +427,16 @@ async function fetchSearchPage(key: string, page: number): Promise<SearchFetch> 
   const ids = ((res.data ?? []) as SearchIdRow[]).map((r) => r.id);
   if (ids.length === 0) return { bundles: [], capped: false };
 
-  const { bundles } = await hydrateBundles(supabase, ids, new Set(), []);
+  const { bundles } = await hydrateBundles(supabase, ids, new Set(), [], negatedSearchWords(key));
   return { bundles, capped: ids.length >= SEARCH_LIMIT };
 }
 
 // The newest-first order (h191), UNCACHED like the two above and THROWING only when even the ranked fallback fails.
-// ONE call to migration 215's `search_cluster_ids_new` with the typed `p_variants` and `p_folded`, `p_limit` SEARCH_LIMIT
-// and `p_offset` (page - 1) * SEARCH_LIMIT, for every page from 1 (no sibling, no locative). A missing function
+// ONE call to migration 215's `search_cluster_ids_new` with `p_variants` and `p_folded` from `newestSearchArguments` (the
+// typed spellings plus the root sibling's, folded as the root; h196-search-1), `p_limit` SEARCH_LIMIT and `p_offset`
+// (page - 1) * SEARCH_LIMIT, for every page from 1, and no second call. OUT OF SCOPE (h196-search-1, replayed: no gain): the
+// locative second call of a bare vowel-final noun ('tarla', 'bolu kaza') and the plural of a short vowel-final noun
+// ('hisseler'); a query with no root sibling sends exactly its typed arguments. A missing function
 // (PGRST202), an error or a thrown exception is never the reader's problem: that request is answered in the RANKED
 // order, page 1 by `fetchSearchClusters` and a later page by `fetchSearchPage`, marked `degraded` so it is memoised for
 // `minutes` only, and logged once. The log line holds the error code and message, never the query (reader-typed
@@ -376,15 +444,15 @@ async function fetchSearchPage(key: string, page: number): Promise<SearchFetch> 
 // is what shows its "Sonraki sonuçlar" link (the next page continues exactly this list).
 // `key` is canonical and length-checked, `page` is 1 to ARCHIVE_MAX_PAGE (searchClusters bounds both).
 async function fetchSearchNewest(key: string, page: number): Promise<SearchFetch> {
-  const { typed, folded } = typedSearchArguments(key);
-  if (typed.length === 0) return { bundles: [], capped: false, newest: true };
+  const { variants, folded } = newestSearchArguments(key);
+  if (variants.length === 0) return { bundles: [], capped: false, newest: true };
 
   const supabase = createReaderClient();
   let ids: string[] | null = null;
   let failure = "";
   try {
     const res = await supabase.rpc("search_cluster_ids_new", {
-      p_variants: typed,
+      p_variants: variants,
       p_folded: folded,
       p_limit: SEARCH_LIMIT,
       p_offset: (page - 1) * SEARCH_LIMIT,
@@ -405,7 +473,7 @@ async function fetchSearchNewest(key: string, page: number): Promise<SearchFetch
   }
   if (ids.length === 0) return { bundles: [], capped: false, newest: true };
 
-  const { bundles } = await hydrateBundles(supabase, ids, new Set(), []);
+  const { bundles } = await hydrateBundles(supabase, ids, new Set(), [], negatedSearchWords(key));
   const full = ids.length >= SEARCH_LIMIT;
   return page === 1 && full
     ? { bundles, capped: full, typedFull: true, newest: true }

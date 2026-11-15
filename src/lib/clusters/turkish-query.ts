@@ -977,3 +977,80 @@ export function holdsLocativeWitness(foldedText: string, foldedTerm: string): bo
   }
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// A negated word, re-checked app-side (h196-search-2).
+//
+// Postgres reads '-fenerbahçe' as a NOT of the stemmed lexeme ('fenerbah', over-cut), while the folded stem arm of
+// migrations 166 / 172 / 194 / 211 / 215 (search_cluster_ids, _v2, _new; md5-pinned, never edited here) stores
+// 'fenerbahce': the UNION admitted those rows through the stem arm, so 'galatasaray -fenerbahçe' listed 5 headlines
+// that name Fenerbahçe among 24 in BOTH orders ('borsa -dolar' 1 of 24, 'dolarlık'). The reader's explicit instruction
+// was broken and no app code checked it. `negatedSearchWords` reads the words the reader negated and
+// `holdsNegatedWord` tests a row's own text for them; search-query.ts drops a row that holds one. Only a word of 5
+// letters or more is judged (a 3 or 4 letter negation such as -zam, -abd or -özel stays with the database lexeme
+// exclusion, because a word-start test would also drop zaman, abdullah and özellikle), and a phrase or a negated phrase
+// is the database's business, so a query with a double quote judges nothing. The same precedent as the locative
+// witness filter above: an app-side check on the embed's own text, no change to any RPC argument or SQL function.
+// ---------------------------------------------------------------------------
+
+/** The most negated words one query is judged on. */
+const MAX_NEGATED_WORDS = 6;
+/** A shorter negated word stays with the database: its word-start test would also drop other words. */
+const MIN_NEGATED_WORD_LENGTH = 5;
+
+/** True when `word` is one or more [a-z0-9] units and nothing else. */
+function isFoldedWord(word: string): boolean {
+  if (word === "") return false;
+  for (let i = 0; i < word.length; i++) {
+    if (!isFoldedWordUnit(word.charCodeAt(i))) return false;
+  }
+  return true;
+}
+
+/**
+ * The folded words a reader negated in `q`: a whitespace-separated token that starts with '-' and has a second
+ * character, Turkish-lower-cased and `foldTr`-folded ('galatasaray -fenerbahçe' -> ['fenerbahce']). Only a word that
+ * is [a-z0-9] throughout and at least 5 letters long is kept (3 and 4 letter negations such as -zam, -abd and -özel
+ * stay with the database lexeme exclusion), in order of first appearance, at most 6. A query with a double quote
+ * gives [] (a phrase or a negated phrase is the database's business), and so does a token with a hyphen or another
+ * character inside it ('-e-okul'). Pure, linear, no RegExp built from the query, never throws.
+ */
+export function negatedSearchWords(q: string): string[] {
+  if (q.includes('"')) return [];
+  const out: string[] = [];
+  for (const token of q.split(/\s+/)) {
+    if (token.length < 2 || token.charCodeAt(0) !== 45) continue;
+    const word = foldTr(token.slice(1).toLocaleLowerCase("tr"));
+    if (word.length < MIN_NEGATED_WORD_LENGTH || !isFoldedWord(word)) continue;
+    if (out.includes(word)) continue;
+    out.push(word);
+    if (out.length >= MAX_NEGATED_WORDS) break;
+  }
+  return out;
+}
+
+/**
+ * Whether a row's text names a negated word: true when some word of `foldedText` (a run of [a-z0-9], one linear walk
+ * like `holdsLocativeWitness`) starts with `foldedWord`, so 'fenerbahce', 'fenerbahcenin' and 'fenerbahceli' hold it
+ * while 'bahce' and 'superfenerbahce' do not, and an apostrophe or a hyphen splits runs ("Fenerbahçe'nin" holds it,
+ * "Fener'bahçe" does not). `foldedText` is `foldTr` of the row's title_tr_neutral, title_tr and summary_tr (what
+ * `search_tsv` holds), `foldedWord` an entry of `negatedSearchWords`. An empty word is false, and so is a word that
+ * holds a character outside [a-z0-9] (it can match no run). No RegExp built from user text; never throws.
+ */
+export function holdsNegatedWord(foldedText: string, foldedWord: string): boolean {
+  if (foldedWord === "") return false;
+  const n = foldedText.length;
+  const length = foldedWord.length;
+  let start = 0;
+  while (start < n) {
+    if (!isFoldedWordUnit(foldedText.charCodeAt(start))) {
+      start++;
+      continue;
+    }
+    let end = start + 1;
+    while (end < n && isFoldedWordUnit(foldedText.charCodeAt(end))) end++;
+    if (end - start >= length && foldedText.startsWith(foldedWord, start)) return true;
+    start = end;
+  }
+  return false;
+}

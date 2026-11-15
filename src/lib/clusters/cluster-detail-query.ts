@@ -81,6 +81,14 @@ function dominantZoneOf(distribution: BiasDistribution): MediaDnaZone | null {
   return dominantZoneOfCounts(zoneCountsOf(distribution));
 }
 
+/**
+ * Every zone, handed to `recallQualifiedZones` as the "matched" list when a
+ * recall VETO (not a Jev read) is the evidence (h196-blindspot-1): the rule then
+ * keeps exactly the empty, non-dominant columns, sorted, and never a column that
+ * has a headline.
+ */
+const ALL_MEDIA_DNA_ZONES: readonly MediaDnaZone[] = ["bagimsiz", "iktidar", "muhalefet"];
+
 /** The same tie-break over per-zone counts already in hand (first of ZONE_ORDER wins a tie). */
 function dominantZoneOfCounts(counts: Record<MediaDnaZone, number>): MediaDnaZone | null {
   const order: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
@@ -198,7 +206,9 @@ export interface ClusterDetail {
   // with this story's event (clusters.blindspot_recall_suspect), so the framing
   // comparison can say "benzer haber başka kümede olabilir" instead of claiming
   // silence there. Sorted, [] unless the cluster is flagged and the lookup
-  // answered. Wording only: no claim, veto, count or share reads it. Optional so
+  // answered, or its claim was VETOED (h196-blindspot-1: then every empty,
+  // non-dominant voting column, with no lookup). Wording only: no claim, veto,
+  // count or share reads it. Optional so
   // fixtures and cache entries written before the field existed still compile;
   // the page reads a missing value as [].
   recallMatchedZones?: MediaDnaZone[];
@@ -631,8 +641,19 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     // a failed lookup is today's page. This neither reads nor writes the claim:
     // isBlindspot, blindspotSide, the veto and the counts above and below are
     // untouched.
+    //
+    // h196-blindspot-1: a VETOED claim (migration 071) is the strongest form of the
+    // same fact: the system found a same-event headline from the silent side in
+    // another cluster and withdrew the claim, so the page must not state that
+    // side's silence flatly either. Every EMPTY voting column that is not the
+    // dominant one is qualified, with no Jev read (the veto is the evidence). The
+    // result is cut to empty columns by the very same rule (recallQualifiedZones),
+    // so a column with headlines is never qualified. Only `veto.vetoed` counts: a
+    // recount-withdrawn (h63) or still-pending claim is no veto and stays [].
+    // For a vetoed AND flagged cluster the Jev read still happens once; its answer
+    // is a subset of the empty columns, so the veto's list is the superset.
     let recallMatchedZones: MediaDnaZone[] = [];
-    if (clusterRow.blindspot_recall_suspect === true) {
+    if (clusterRow.blindspot_recall_suspect === true || veto.vetoed) {
       const votingZoneCounts: Record<MediaDnaZone, number> = {
         iktidar: 0,
         bagimsiz: 0,
@@ -642,15 +663,24 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         if (isVotingKind(m.source.kind)) votingZoneCounts[zoneOf(m.source.bias)] += 1;
       }
       const pageDominant = dominantZoneOfCounts(votingZoneCounts);
-      // Always asked once flagged, even when no voting member exists (then there
-      // is no dominant zone and the page draws no framing block, so the answer is
-      // moot): the rule stays "flagged means looked up".
-      const matched = await fetchRecallMatchedZones(supabase, [id]);
-      recallMatchedZones = recallQualifiedZones(
-        votingZoneCounts,
-        pageDominant,
-        matched.get(id),
-      );
+      if (clusterRow.blindspot_recall_suspect === true) {
+        // Always asked once flagged, even when no voting member exists (then there
+        // is no dominant zone and the page draws no framing block, so the answer is
+        // moot): the rule stays "flagged means looked up".
+        const matched = await fetchRecallMatchedZones(supabase, [id]);
+        recallMatchedZones = recallQualifiedZones(
+          votingZoneCounts,
+          pageDominant,
+          matched.get(id),
+        );
+      }
+      if (veto.vetoed) {
+        recallMatchedZones = recallQualifiedZones(
+          votingZoneCounts,
+          pageDominant,
+          ALL_MEDIA_DNA_ZONES,
+        );
+      }
     }
 
     // Cluster titles were stored before the ingest entity fix, so 49 archived

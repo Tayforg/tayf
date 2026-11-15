@@ -494,7 +494,8 @@ describe("215 search_cluster_ids_new: the function", () => {
     const at = source.indexOf('rpc("search_cluster_ids_new"');
     expect(at, "the app's call").toBeGreaterThan(0);
     const call = source.slice(at, source.indexOf("});", at));
-    expect(call).toContain("p_variants: typed");
+    // h196-search-1: the variants come from newestSearchArguments (the typed spellings, then the root sibling's)
+    expect(call).toContain("p_variants: variants");
     expect(call).toContain("p_folded: folded");
     expect(call).toContain("p_limit: SEARCH_LIMIT");
     expect(call).toContain("p_offset: (page - 1) * SEARCH_LIMIT");

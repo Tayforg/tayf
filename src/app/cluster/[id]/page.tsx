@@ -1106,7 +1106,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 a story that names no hub. */}
             <EntityHubChips keys={hubKeys} />
 
-            {storyTimeline && <StoryTimeline timeline={storyTimeline} />}
+            {storyTimeline && (
+              <StoryTimeline
+                timeline={storyTimeline}
+                unit={wire.isWireRedistribution ? "haber" : "kaynak"}
+              />
+            )}
 
             <Suspense fallback={null}>
               <ClusterThreadSlot id={id} />
