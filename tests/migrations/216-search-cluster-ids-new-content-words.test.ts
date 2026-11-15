@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { assertLiveReady } from "../_helpers/live-db";
 
@@ -1011,6 +1011,10 @@ select ('00000000-0000-4000-8000-' || lpad((216300 + n)::text, 12, '0'))::uuid, 
 
   let content: Map<string, string[]> | null = null;
   const contentOut = (): Map<string, string[]> => (content ??= parse(runPsql(contentScript)));
+  // One psql run feeds every case below. It runs here, not lazily inside the first case: on a CI runner it takes about 20 s, past the 10 s test timeout.
+  beforeAll(() => {
+    contentOut();
+  }, 120_000);
 
   it("'iran ile abd' lists the title with 'ile' AND the titles without it, newest first, and no title that lacks the word iran (215 listed only the first)", () => {
     expect(ids(contentOut(), "old_iran_ile_abd")).toEqual([seedId(101)]);
