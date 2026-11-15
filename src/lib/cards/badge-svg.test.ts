@@ -175,3 +175,75 @@ describe("renderSpectrumBadgeSvg for a language-isolated (all-English) cluster (
     expect(svg).not.toMatch(/&(?!amp;|lt;|gt;|quot;|apos;)/);
   });
 });
+
+// h190-share-1: for a wire redistribution `sourceCount` is the distinct-text count
+// while the percents are over every classified member, so the badge printed
+// "3 kaynak · %50/%50/%0" for 4 + 4 votes (532ee77c). With isWire the aria-label,
+// the <title> and the caption say 'N kaynak · M sınıflandırılmış'; omitted or
+// false leaves the badge byte for byte as it was.
+describe("renderSpectrumBadgeSvg for a wire redistribution (h190-share-1)", () => {
+  const captionOf = (svg: string): string => svg.match(/<text x="64"[^>]*>([^<]*)<\/text>/)![1]!;
+
+  it("532ee77c: label, title and caption name the 8 classified votes next to '3 kaynak'", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(4, 4, 0), sourceCount: 3, isWire: true });
+    const label = "Tayf yelpazesi: İktidar %50, Bağımsız %50, Muhalefet %0 · 3 kaynak · 8 sınıflandırılmış";
+    expect(svg).toContain(`aria-label="${label}"`);
+    expect(svg).toContain(`<title>${label}</title>`);
+    expect(svg).toContain(">3 kaynak · 8 sınıflandırılmış · %50/%50/%0</text>");
+  });
+
+  it("without the flag the same input is the old stale-tally badge, byte for byte", () => {
+    const input = { zones: zones(4, 4, 0), sourceCount: 3 };
+    const plain = renderSpectrumBadgeSvg(input);
+    expect(plain).toContain('aria-label="Tayf yelpazesi: İktidar %50, Bağımsız %50, Muhalefet %0 · 3 kaynak"');
+    expect(plain).toContain(">3 kaynak · %50/%50/%0</text>");
+    expect(plain).not.toContain("sınıflandırılmış");
+    expect(renderSpectrumBadgeSvg({ ...input, isWire: false })).toBe(plain);
+  });
+
+  it("only the label, the title and the caption differ from the unflagged badge (bar and geometry untouched)", () => {
+    const wire = renderSpectrumBadgeSvg({ zones: zones(4, 4, 0), sourceCount: 3, isWire: true });
+    const plain = renderSpectrumBadgeSvg({ zones: zones(4, 4, 0), sourceCount: 3 });
+    expect(barWidths(wire)).toEqual(barWidths(plain));
+    const strip = (svg: string) =>
+      svg
+        .replace(/aria-label="[^"]*"/, "")
+        .replace(/<title>[^<]*<\/title>/, "")
+        .replace(/(<text x="64"[^>]*>)[^<]*(<\/text>)/, "$1$2");
+    expect(strip(wire)).toBe(strip(plain));
+  });
+
+  it("a wire cluster whose votes are below the count keeps the parenthesised form", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(3, 3, 2), sourceCount: 12, isWire: true });
+    expect(svg).toContain(">12 kaynak (8 sınıflandırılmış) · %38/%37/%25</text>");
+  });
+
+  it("a wire cluster whose votes equal the count keeps the bare count", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(4, 4, 0), sourceCount: 8, isWire: true });
+    expect(svg).toContain(">8 kaynak · %50/%50/%0</text>");
+    expect(svg).not.toContain("sınıflandırılmış");
+  });
+
+  it("the empty badge and the all-English badge ignore the flag", () => {
+    const empty = { zones: zones(0, 0, 0), sourceCount: 2 };
+    expect(renderSpectrumBadgeSvg({ ...empty, isWire: true })).toBe(renderSpectrumBadgeSvg(empty));
+    const english = { zones: zones(4, 4, 0), sourceCount: 3, languageIsolated: true };
+    expect(renderSpectrumBadgeSvg({ ...english, isWire: true })).toBe(renderSpectrumBadgeSvg(english));
+  });
+
+  it("the caption stays within the 320x48 badge for 2-digit counts (10 px text from x=64, ~46 characters of room)", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(10, 5, 5), sourceCount: 12, isWire: true });
+    expect(captionOf(svg)).toBe("12 kaynak · 20 sınıflandırılmış · %50/%25/%25");
+    expect(captionOf(svg).length).toBeLessThanOrEqual(46);
+    // three 2-digit shares is the widest percent trio a 2-digit-count badge can carry
+    const wide = renderSpectrumBadgeSvg({ zones: zones(7, 7, 6), sourceCount: 12, isWire: true });
+    expect(captionOf(wide)).toBe("12 kaynak · 20 sınıflandırılmış · %35/%35/%30");
+    expect(captionOf(wide).length).toBeLessThanOrEqual(46);
+  });
+
+  it("never emits raw <script or an unescaped ampersand", () => {
+    const svg = renderSpectrumBadgeSvg({ zones: zones(4, 4, 0), sourceCount: 3, isWire: true });
+    expect(svg).not.toContain("<script");
+    expect(svg).not.toMatch(/&(?!amp;|lt;|gt;|quot;|apos;)/);
+  });
+});

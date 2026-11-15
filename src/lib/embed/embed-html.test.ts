@@ -33,6 +33,8 @@ function detail(over: {
   titleMethod?: ClusterDetail["cluster"]["title_method"];
   /** Omitted: the field is absent, like a cache entry written before it existed. */
   recallMatchedZones?: MediaDnaZone[];
+  /** wire.isWireRedistribution. Omitted: the field is absent, as in the fixtures that predate it. */
+  isWire?: boolean;
 }): ClusterDetail {
   return {
     cluster: {
@@ -52,7 +54,10 @@ function detail(over: {
     },
     members: over.members ?? [],
     allSources: [],
-    wire: { effectiveArticleCount: over.sourceCount ?? 4 } as ClusterDetail["wire"],
+    wire: {
+      effectiveArticleCount: over.sourceCount ?? 4,
+      ...(over.isWire === undefined ? {} : { isWireRedistribution: over.isWire }),
+    } as ClusterDetail["wire"],
     blindspotSuppressed: false,
     blindspotRecallVetoed: false,
     ...(over.recallMatchedZones === undefined ? {} : { recallMatchedZones: over.recallMatchedZones }),
@@ -951,6 +956,109 @@ describe("renderEmbedHtml legend basis (h44-consistency-1)", () => {
       distribution: dist({ pro_government: 1, center: 4, opposition: 4 }),
     });
     expect(legend.endsWith(` · ${head}`)).toBe(true);
+  });
+});
+
+// h190-share-1: a wire redistribution's `sourceCount` is its distinct-text count
+// while the percents are over every classified member, so '3 kaynak' sat next to
+// %50/%50 (532ee77c: 9 members, 3 distinct texts, 4 + 4 votes). Only a cluster with
+// wire.isWireRedistribution true gets the text-context form 'N kaynak · M
+// sınıflandırılmış'; every other cluster, stale tallies included, keeps its legend.
+describe("renderEmbedHtml legend for a wire redistribution (h190-share-1)", () => {
+  // The 532ee77c shape: pro_government 3 + gov_leaning 1 = İktidar 4, center 4 = Bağımsız 4.
+  const WIRE_DIST = dist({ pro_government: 3, gov_leaning: 1, center: 4 });
+  const legendOfDetail = (d: ClusterDetail): string => {
+    const html = renderEmbedHtml(buildEmbedModel(d, ORIGIN));
+    const m = html.match(/<p class="l">([^<]*)<\/p>/);
+    expect(m).not.toBeNull();
+    return m![1]!;
+  };
+  const ariaOfDetail = (d: ClusterDetail): string =>
+    renderEmbedHtml(buildEmbedModel(d, ORIGIN)).match(/role="img" aria-label="([^"]*)"/)![1]!;
+
+  it("532ee77c: says '3 kaynak · 8 sınıflandırılmış' beside %50/%50", () => {
+    const d = detail({ isWire: true, sourceCount: 3, distribution: WIRE_DIST });
+    expect(legendOfDetail(d)).toBe(
+      "İktidar %50 · Bağımsız %50 · Muhalefet %0 · 3 kaynak · 8 sınıflandırılmış",
+    );
+  });
+
+  it("buildEmbedModel carries the flag: true only for isWireRedistribution === true", () => {
+    expect(buildEmbedModel(detail({ isWire: true, distribution: WIRE_DIST }), ORIGIN).isWire).toBe(true);
+    expect(buildEmbedModel(detail({ isWire: false, distribution: WIRE_DIST }), ORIGIN).isWire).toBe(false);
+    // a fixture or cache entry with no such field is not a wire cluster
+    expect(buildEmbedModel(detail({ distribution: WIRE_DIST }), ORIGIN).isWire).toBe(false);
+  });
+
+  it("the same counts without the wire flag keep the bare count (the stale-tally rule is not widened)", () => {
+    for (const isWire of [false, undefined]) {
+      const d = detail({ isWire, sourceCount: 3, distribution: WIRE_DIST });
+      expect(legendOfDetail(d)).toBe("İktidar %50 · Bağımsız %50 · Muhalefet %0 · 3 kaynak");
+    }
+  });
+
+  it("55e2c33a and 22c3980a: the vote count M is the classified total, whatever N", () => {
+    expect(
+      legendOfDetail(detail({ isWire: true, sourceCount: 2, distribution: dist({ pro_government: 5, center: 1 }) })),
+    ).toBe("İktidar %83 · Bağımsız %17 · Muhalefet %0 · 2 kaynak · 6 sınıflandırılmış");
+    expect(
+      legendOfDetail(
+        detail({ isWire: true, sourceCount: 7, distribution: dist({ pro_government: 11, center: 1, opposition: 1 }) }),
+      ),
+    ).toBe("İktidar %84 · Bağımsız %8 · Muhalefet %8 · 7 kaynak · 13 sınıflandırılmış");
+  });
+
+  it("a wire cluster whose votes are below the count keeps the parenthesised form", () => {
+    const d = detail({ isWire: true, sourceCount: 10, distribution: dist({ pro_government: 5, center: 3 }) });
+    expect(legendOfDetail(d)).toBe("İktidar %63 · Bağımsız %37 · Muhalefet %0 · 10 kaynak (8 sınıflandırılmış)");
+  });
+
+  it("a wire cluster whose votes equal the count keeps the bare count", () => {
+    const d = detail({ isWire: true, sourceCount: 8, distribution: WIRE_DIST });
+    expect(legendOfDetail(d)).toBe("İktidar %50 · Bağımsız %50 · Muhalefet %0 · 8 kaynak");
+  });
+
+  it("an all-English wire cluster keeps the plain English-only legend (layout budget)", () => {
+    const members = [
+      memberOf("daily-sabah", "outlet", "pro_government"),
+      memberOf("hurriyet-daily-news", "outlet", "gov_leaning"),
+      memberOf("trt-world", "outlet", "pro_government"),
+    ];
+    const iso = (isWire: boolean | undefined) =>
+      detail({ isWire, sourceCount: 3, distribution: WIRE_DIST, members, title: members[2]!.article.title, titleMethod: "extractive" });
+    expect(buildEmbedModel(iso(true), ORIGIN).languageIsolated).toBe(true);
+    const CLAUSE = "Yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı";
+    expect(legendOfDetail(iso(true))).toBe(`${CLAUSE} · 3 kaynak`);
+    expect(legendOfDetail(iso(false))).toBe(`${CLAUSE} · 3 kaynak`);
+  });
+
+  it("leaves the aria-label, the empty-distribution sentence and the bar untouched", () => {
+    const d = detail({ isWire: true, sourceCount: 3, distribution: WIRE_DIST });
+    expect(ariaOfDetail(d)).toBe("İktidar %50, Bağımsız %50, Muhalefet %0");
+    expect(ariaOfDetail(d)).toBe(ariaOfDetail(detail({ sourceCount: 3, distribution: WIRE_DIST })));
+    expect(legendOfDetail(detail({ isWire: true, sourceCount: 3, distribution: dist() }))).toBe(
+      "Bu haberde henüz sınıflandırılmış kaynak yok · 3 kaynak",
+    );
+    const bar = (x: ClusterDetail) => renderEmbedHtml(buildEmbedModel(x, ORIGIN)).match(/<div class="bar".*?<\/div>/)![0];
+    expect(bar(d)).toBe(bar(detail({ sourceCount: 3, distribution: WIRE_DIST })));
+  });
+
+  it("is the old document, byte for byte, apart from the legend text", () => {
+    const wire = renderEmbedHtml(buildEmbedModel(detail({ isWire: true, sourceCount: 3, distribution: WIRE_DIST }), ORIGIN));
+    const plain = renderEmbedHtml(buildEmbedModel(detail({ sourceCount: 3, distribution: WIRE_DIST }), ORIGIN));
+    const strip = (html: string) => html.replace(/<p class="l">[^<]*<\/p>/, "");
+    expect(strip(wire)).toBe(strip(plain));
+    expect(wire).not.toBe(plain);
+  });
+
+  it("the qualified legend is as long as the parenthesised one, so the layout budget holds", () => {
+    const wireLegend = legendOfDetail(detail({ isWire: true, sourceCount: 3, distribution: WIRE_DIST }));
+    const parenthesised = legendOfDetail(
+      detail({ sourceCount: 3, distribution: dist({ pro_government: 2 }) }),
+    );
+    // Only the count heads are compared (the percents differ between the two clusters).
+    const head = (legend: string) => legend.slice(legend.indexOf("3 kaynak"));
+    expect(head(wireLegend)).toHaveLength(head(parenthesised).length);
   });
 });
 

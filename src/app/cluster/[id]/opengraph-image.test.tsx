@@ -736,9 +736,9 @@ describe("cluster opengraph-image", () => {
       expect(text).not.toContain("sınıflandırılmış");
     });
 
-    it("keeps the bare wire-adjusted count when it is below the classified total", async () => {
-      // effectiveArticleCount (1) is below the classified total (4): there is
-      // nothing to qualify, exactly as sourceCountHead prints it elsewhere.
+    it("names the classified votes when a wire cluster's count (1) is below the classified total (4)", async () => {
+      // h190-share-1: this case used to keep the bare '1 kaynak' (the "known gap"
+      // against buildShareText): the tiles below hold 4 votes, so the pill says so.
       getClusterDetailOrThrow.mockResolvedValueOnce(
         mkDetail(
           { article_count: 7, is_blindspot: false, blindspot_side: null },
@@ -749,9 +749,9 @@ describe("cluster opengraph-image", () => {
 
       await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
-      const text = collectText(captured).join("");
-      expect(text).toContain("1 kaynak");
-      expect(text).not.toContain("sınıflandırılmış");
+      const leaves = collectText(captured);
+      expect(leaves).toContain("1 kaynak · 4 sınıflandırılmış");
+      expect(leaves).toContain("7 kopya · tek kaynak");
     });
 
     it("uses the shared helper's wording", async () => {
@@ -771,6 +771,89 @@ describe("cluster opengraph-image", () => {
       const text = collectText(captured).join("");
       expect(text).toContain(sourceCountHead(12, { iktidar: 4, bagimsiz: 0, muhalefet: 5 }));
       expect(text).toContain("12 kaynak (9 sınıflandırılmış)");
+    });
+  });
+
+  // h190-share-1: a wire redistribution's pill is its distinct-text count ('3
+  // kaynak') while the tiles are over every classified vote (4 + 4), so it printed
+  // '3 kaynak' above İktidar %50 · 4 / Bağımsız %50 · 4. With wire true the pill
+  // says 'N kaynak · M sınıflandırılmış'; the violet badge is unchanged, and so is
+  // every cluster that is not a wire redistribution.
+  describe("source-count pill of a wire redistribution (h190-share-1)", () => {
+    const ZERO_DIST = {
+      pro_government: 0,
+      gov_leaning: 0,
+      state_media: 0,
+      center: 0,
+      opposition_leaning: 0,
+      opposition: 0,
+      nationalist: 0,
+      islamist_conservative: 0,
+      pro_kurdish: 0,
+      international: 0,
+    };
+    // The 532ee77c shape: 9 members, 3 distinct texts, 8 votes (İktidar 4, Bağımsız 4).
+    const DIST_532EE77C = { ...ZERO_DIST, pro_government: 3, gov_leaning: 1, center: 4 };
+    const leavesFor = async (detail: ClusterDetail): Promise<string[]> => {
+      getClusterDetailOrThrow.mockResolvedValueOnce(detail);
+      const { default: Image } = await import("./opengraph-image");
+      await Image({ params: Promise.resolve({ id: VALID_ID }) });
+      return collectText(captured);
+    };
+
+    it("532ee77c: the pill reads '3 kaynak · 8 sınıflandırılmış' and the violet '9 haber · 3 farklı metin' badge stays", async () => {
+      const leaves = await leavesFor(
+        mkDetail(
+          { article_count: 9, is_blindspot: false, blindspot_side: null, bias_distribution: DIST_532EE77C },
+          { isWireRedistribution: true, effectiveArticleCount: 3, memberCount: 9 },
+        ),
+      );
+      expect(leaves).toContain("3 kaynak · 8 sınıflandırılmış");
+      expect(leaves).toContain("9 haber · 3 farklı metin");
+      // the bare pill is gone, and the tiles are the cluster's own
+      expect(leaves).not.toContain("3 kaynak");
+      expect(leaves.join("")).toContain("%50 · 4");
+    });
+
+    it("the same votes on a cluster that is not a wire redistribution keep the bare pill", async () => {
+      const leaves = await leavesFor(
+        mkDetail(
+          { article_count: 3, is_blindspot: false, blindspot_side: null, bias_distribution: DIST_532EE77C },
+          { isWireRedistribution: false, effectiveArticleCount: 3, memberCount: 3 },
+        ),
+      );
+      expect(leaves).toContain("3 kaynak");
+      expect(leaves.join("")).not.toContain("sınıflandırılmış");
+      expect(leaves.join("")).not.toContain("farklı metin");
+    });
+
+    it("a wire cluster with fewer votes than its count keeps the parenthesised form, and one with equal votes the bare count", async () => {
+      const fewer = await leavesFor(
+        mkDetail(
+          { article_count: 9, is_blindspot: false, blindspot_side: null, bias_distribution: { ...ZERO_DIST, pro_government: 4, gov_leaning: 2, state_media: 1 } },
+          { isWireRedistribution: true, effectiveArticleCount: 9, memberCount: 9 },
+        ),
+      );
+      expect(fewer).toContain("9 kaynak (7 sınıflandırılmış)");
+      const equal = await leavesFor(
+        mkDetail(
+          { article_count: 9, is_blindspot: false, blindspot_side: null, bias_distribution: { ...ZERO_DIST, pro_government: 5, gov_leaning: 3, state_media: 1 } },
+          { isWireRedistribution: true, effectiveArticleCount: 9, memberCount: 9 },
+        ),
+      );
+      expect(equal).toContain("9 kaynak");
+      expect(equal.join("")).not.toContain("sınıflandırılmış");
+    });
+
+    it("uses the shared wire helper's wording", async () => {
+      const { wireSourceCountHead } = await import("@/lib/feeds/zone-line");
+      const leaves = await leavesFor(
+        mkDetail(
+          { article_count: 9, is_blindspot: false, blindspot_side: null, bias_distribution: DIST_532EE77C },
+          { isWireRedistribution: true, effectiveArticleCount: 3, memberCount: 9 },
+        ),
+      );
+      expect(leaves).toContain(wireSourceCountHead(3, { iktidar: 4, bagimsiz: 4, muhalefet: 0 }, true));
     });
   });
 

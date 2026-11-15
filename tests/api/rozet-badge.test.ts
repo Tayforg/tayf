@@ -138,3 +138,38 @@ describe("GET /rozet/[file] for an all-English cluster (h118-shares-1)", () => {
   });
 });
 
+// h190-share-1: a wire redistribution's badge counts distinct texts ('3 kaynak')
+// next to percents over every classified vote (4 + 4). The route hands the
+// cluster's own wire flag to the renderer, which then names the votes.
+describe("GET /rozet/[file] for a wire redistribution (h190-share-1)", () => {
+  const wireDetail = (isWireRedistribution: boolean | undefined) => ({
+    // 532ee77c: pro_government 3 + gov_leaning 1 = İktidar 4, center 4 = Bağımsız 4
+    cluster: { bias_distribution: { pro_government: 3, gov_leaning: 1, center: 4 } },
+    members: [],
+    wire: {
+      effectiveArticleCount: 3,
+      ...(isWireRedistribution === undefined ? {} : { isWireRedistribution }),
+    },
+  });
+  const bodyOf = async () => (await call(`${ID}.svg`)).text();
+
+  it("532ee77c: label, title and caption read '3 kaynak · 8 sınıflandırılmış'", async () => {
+    getClusterDetailMock.mockResolvedValue(wireDetail(true));
+    const body = await bodyOf();
+    expect(body).toContain(
+      "<title>Tayf yelpazesi: İktidar %50, Bağımsız %50, Muhalefet %0 · 3 kaynak · 8 sınıflandırılmış</title>",
+    );
+    expect(body).toContain('aria-label="Tayf yelpazesi: İktidar %50, Bağımsız %50, Muhalefet %0 · 3 kaynak · 8 sınıflandırılmış"');
+    expect(body).toContain(">3 kaynak · 8 sınıflandırılmış · %50/%50/%0</text>");
+  });
+
+  it("a cluster that is not a wire redistribution keeps the bare '3 kaynak' (false or no flag at all)", async () => {
+    for (const flag of [false, undefined]) {
+      getClusterDetailMock.mockResolvedValue(wireDetail(flag));
+      const body = await bodyOf();
+      expect(body).toContain("<title>Tayf yelpazesi: İktidar %50, Bağımsız %50, Muhalefet %0 · 3 kaynak</title>");
+      expect(body).toContain(">3 kaynak · %50/%50/%0</text>");
+      expect(body).not.toContain("sınıflandırılmış");
+    }
+  });
+});

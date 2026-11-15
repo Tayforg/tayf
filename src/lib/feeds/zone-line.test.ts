@@ -4,6 +4,7 @@ import {
   votingZoneCounts,
   formatZoneLine,
   sourceCountHead,
+  wireSourceCountHead,
 } from "./zone-line";
 
 describe("zoneCountsFromSources", () => {
@@ -153,5 +154,62 @@ describe("sourceCountHead", () => {
       const description = `${sourceCountHead(total, counts)} · ${formatZoneLine(counts)}`;
       expect(description.split(" · ")).toHaveLength(4);
     }
+  });
+});
+
+// h190-share-1: the share surfaces (embed legend, rozet badge, OG pill) print the
+// distinct-text count of a wire redistribution as 'N kaynak' next to percents
+// over MORE votes (3 kaynak beside %50/%50: 4 + 4 votes). For a wire cluster
+// whose classified votes M exceed N the head says so, in the text-context form
+// 'N kaynak · M sınıflandırılmış'. Every other case is sourceCountHead's.
+describe("wireSourceCountHead", () => {
+  it("532ee77c: a wire cluster with 3 distinct texts and 8 votes reads '3 kaynak · 8 sınıflandırılmış'", () => {
+    expect(
+      wireSourceCountHead(3, { iktidar: 4, bagimsiz: 4, muhalefet: 0 }, true),
+    ).toBe("3 kaynak · 8 sınıflandırılmış");
+  });
+
+  it("pins the existing stale-tally rule: the same counts without the wire flag keep the bare count", () => {
+    expect(
+      wireSourceCountHead(3, { iktidar: 4, bagimsiz: 4, muhalefet: 0 }, false),
+    ).toBe("3 kaynak");
+    expect(
+      wireSourceCountHead(3, { iktidar: 4, bagimsiz: 4, muhalefet: 0 }, false),
+    ).toBe(sourceCountHead(3, { iktidar: 4, bagimsiz: 4, muhalefet: 0 }));
+  });
+
+  it("a wire cluster whose votes are below the count is sourceCountHead's parenthesised form", () => {
+    const counts = { iktidar: 8, bagimsiz: 0, muhalefet: 0 };
+    expect(wireSourceCountHead(10, counts, true)).toBe("10 kaynak (8 sınıflandırılmış)");
+    expect(wireSourceCountHead(10, counts, true)).toBe(sourceCountHead(10, counts));
+  });
+
+  it("a wire cluster whose votes equal the count keeps the bare count", () => {
+    expect(
+      wireSourceCountHead(7, { iktidar: 4, bagimsiz: 2, muhalefet: 1 }, true),
+    ).toBe("7 kaynak");
+  });
+
+  it("an empty cluster is '0 kaynak', wire or not, even with a stale tally", () => {
+    const zero = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+    expect(wireSourceCountHead(0, zero, true)).toBe("0 kaynak");
+    expect(wireSourceCountHead(0, zero, false)).toBe("0 kaynak");
+    expect(
+      wireSourceCountHead(0, { iktidar: 2, bagimsiz: 0, muhalefet: 0 }, true),
+    ).toBe("0 kaynak");
+  });
+
+  it("is exactly as long as the parenthesised head, so the embed's layout budget is unchanged", () => {
+    const parenthesised = sourceCountHead(3, { iktidar: 2, bagimsiz: 0, muhalefet: 0 });
+    expect(parenthesised).toBe("3 kaynak (2 sınıflandırılmış)");
+    expect(parenthesised).toHaveLength(29);
+    const wire = wireSourceCountHead(3, { iktidar: 4, bagimsiz: 4, muhalefet: 0 }, true);
+    expect(wire).toHaveLength(parenthesised.length);
+  });
+
+  it("leaves sourceCountHead itself on the bare-count rule for a stale tally", () => {
+    expect(
+      sourceCountHead(3, { iktidar: 4, bagimsiz: 4, muhalefet: 0 }),
+    ).toBe("3 kaynak");
   });
 });
