@@ -15,6 +15,7 @@ import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-chan
 import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
 import { NewBreakingPill } from "@/components/home/new-breaking-pill";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
+import { RelaxedSearchLinks } from "@/components/home/relaxed-search-links";
 import { RisingRail, loadRisingRail } from "@/components/home/rising-rail";
 import { SearchEcho } from "@/components/search/search-echo";
 import { PageHero } from "@/components/ui/page-hero";
@@ -45,6 +46,7 @@ import { groupByDayBucket } from "@/lib/home/day-buckets";
 import { shouldStampLastVisit } from "@/lib/last-visit";
 import { searchIntentLink, type SearchIntent } from "@/lib/search/search-intent";
 import { loadSearchIntent } from "@/lib/search/search-intent-query";
+import { relaxedSearchWords } from "@/lib/search/relaxed-search";
 import {
   MIN_QUERY_LENGTH,
   archivePagePhrase,
@@ -849,6 +851,11 @@ function EmptySearch({
   tooShort?: boolean;
 }) {
   const echoed = displayQuery(query) !== "";
+  // h185-roadmap2-1: the archive ANDs every typed word, so a long question finds nothing while each of
+  // its words has results. A multi-word search with no result offers one chip per word. Pure: it reads
+  // no data (the words come from the canonical query the search already used), so the zero-result render
+  // does no extra read. Nothing for a too-short query (no search ran) or a single word.
+  const words = !tooShort && echoed ? relaxedSearchWords(query ?? "") : [];
   return (
     <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-16 text-center">
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
@@ -870,6 +877,9 @@ function EmptySearch({
         <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed">
           Aramanıza uyan bir küme yok. Farklı bir kelime deneyin.
         </p>
+      )}
+      {words.length > 0 && (
+        <RelaxedSearchLinks words={words} targetId={HOME_FEED_ID} />
       )}
       <ClearSearchLink targetId={HOME_FEED_ID} />
     </div>

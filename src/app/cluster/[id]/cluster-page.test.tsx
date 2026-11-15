@@ -32,6 +32,7 @@ import { SourceChips } from "@/components/source/source-chips";
 import { SOURCE_METADATA } from "@/lib/sources/factuality";
 import { GENERATED_IMAGE_HOSTS } from "@/lib/images/remote-image-hosts.data";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
+import { SavedSeenMark } from "@/components/bookmark/saved-seen-mark";
 import { CompareButton } from "@/components/compare/compare-button";
 import {
   bookmarkChipSuffix,
@@ -1749,6 +1750,20 @@ describe("ClusterDetailPage — mobile tap targets (h16-mobile-2)", () => {
     expect(hasElementOfType(group.props.children, CompareButton)).toBe(true);
     expect(collectHrefs(group.props.children)).toContain("/metodoloji?cluster=c1#duzeltme");
     expect(collectText(group.props.children).join("")).toContain("Düzeltme talebi");
+  });
+
+  // h185-roadmap2-2: opening a saved story marks it seen on this device. The mark renders nothing and
+  // takes the route id and the server `updated_at` of the cluster it rendered (never a count: the page's
+  // wire-collapsed count is not the /saved snapshot's measure; never the client clock).
+  it("mounts one SavedSeenMark with the cluster id and the rendered updated_at in the actions group, next to BookmarkButton", async () => {
+    const tree = await renderTree();
+    const marks = findAllElements(tree, (el) => el.type === SavedSeenMark);
+    expect(marks).toHaveLength(1);
+    // no count and no member list: just the id and the server stamp of the copy the page rendered
+    expect(marks[0]!.props).toEqual({ clusterId: "c1", updatedAt: "2026-09-06T12:00:00.000Z" });
+    const group = actionsOf(tree)[0]!;
+    expect(hasElementOfType(group.props.children, SavedSeenMark)).toBe(true);
+    expect(hasElementOfType(group.props.children, BookmarkButton)).toBe(true);
   });
 
   it("makes both groups display:contents from sm up and their own full-width flex row below sm", async () => {

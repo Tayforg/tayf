@@ -40,7 +40,8 @@ import { isEditableTarget } from "./focus-feed-on-page-change";
 const CLASS_NAME =
   "mt-1 inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted";
 
-function focusTarget(targetId: string): void {
+// Exported for RelaxedSearchLinks (h185-roadmap2-1), which hands focus over the same way.
+export function focusTarget(targetId: string): void {
   if (isEditableTarget(document.activeElement)) return;
   document.getElementById(targetId)?.focus({ preventScroll: true });
 }
