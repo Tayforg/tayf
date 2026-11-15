@@ -1,5 +1,5 @@
 import { escapeXml } from "@/lib/feeds/rss-builder";
-import { sourceCountHead } from "@/lib/feeds/zone-line";
+import { wireSourceCountHead } from "@/lib/feeds/zone-line";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import { ENGLISH_ONLY_BADGE_TAG, ENGLISH_ONLY_SHARE_CLAUSE } from "@/lib/sources/source-language";
 import type { MediaDnaZone } from "@/types";
@@ -36,11 +36,18 @@ function safeInt(n: number): number {
  * yalnızca İngilizce kaynaklar, Türkçe haberlerle karşılaştırılmadı · N kaynak",
  * "N kaynak · yalnızca İngilizce"). The bar is the cluster's own and is drawn as
  * before. Omitted or false leaves the badge byte for byte as it was.
+ *
+ * `isWire` (h190-share-1) is `wire.isWireRedistribution`: `sourceCount` is then
+ * the distinct-text count while the percents are over every classified vote, so
+ * a vote count above it is named ('3 kaynak · 8 sınıflandırılmış', see
+ * `wireSourceCountHead`). Omitted or false leaves the badge byte for byte as it
+ * was.
  */
 export function renderSpectrumBadgeSvg(input: {
   zones: Record<MediaDnaZone, number>;
   sourceCount: number;
   languageIsolated?: boolean;
+  isWire?: boolean;
 }): string {
   const n = safeInt(input.sourceCount);
   const total = ZONE_ORDER.reduce((a, z) => a + safeInt(input.zones[z]), 0);
@@ -53,12 +60,13 @@ export function renderSpectrumBadgeSvg(input: {
   const pct = zonePercents(counts);
   // The percents are over the classified (voting) sources only, while `n` is
   // wire.effectiveArticleCount: the deduped member count for a normal cluster,
-  // the distinct-text count for a wire redistribution. sourceCountHead adds
-  // '(M sınıflandırılmış)' only when the voting count M is smaller than N:
+  // the distinct-text count for a wire redistribution. The head adds
+  // '(M sınıflandırılmış)' when the voting count M is smaller than N:
   // 'N kaynak (M sınıflandırılmış)' when M < N, plain 'N kaynak' otherwise. For
-  // a wire cluster whose votes exceed N the head stays plain, a known gap
-  // against buildShareText's 'M sınıflandırılmış haber' left for a follow-up.
-  const head = sourceCountHead(n, counts);
+  // a wire cluster whose votes exceed N (h190-share-1) it reads 'N kaynak · M
+  // sınıflandırılmış', as long as the parenthesised form; any other cluster
+  // with a stale tally above N keeps the plain count.
+  const head = wireSourceCountHead(n, counts, input.isWire === true);
 
   const label = input.languageIsolated
     ? `Tayf yelpazesi: ${ENGLISH_ONLY_SHARE_CLAUSE} · ${n} kaynak`

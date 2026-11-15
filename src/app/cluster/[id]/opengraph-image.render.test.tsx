@@ -268,6 +268,93 @@ describe("cluster opengraph-image (real Satori render)", () => {
     }
   }, 30_000);
 
+  // h190-share-1: a wire cluster's pill now reads "3 kaynak · 8 sınıflandırılmış"
+  // (532ee77c: 9 members, 3 distinct texts, 8 votes), the longest top-row pair:
+  // the pill and the violet "9 haber · 3 farklı metin" badge must stay side by
+  // side on one row, left of the 72 px right padding (nothing clipped), and clear
+  // of the wordmark. Pixel classes: the pill's text is neutral light grey (#e4e4e7)
+  // and the badge's text and border are violet (blue well above green).
+  describe("qualified wire pill beside the violet badge (h190-share-1)", () => {
+    const DIST_532EE77C = {
+      ...blindspotDetail().cluster.bias_distribution,
+      pro_government: 3,
+      gov_leaning: 1,
+      state_media: 0,
+      center: 4,
+    };
+    const render = async (
+      cluster: Partial<ClusterDetail["cluster"]>,
+      wire: ClusterDetail["wire"],
+    ): Promise<DecodedPng> => {
+      const base = blindspotDetail();
+      getClusterDetailOrThrow.mockResolvedValueOnce({ ...base, cluster: { ...base.cluster, ...cluster }, wire });
+      const { default: Image } = await import("./opengraph-image");
+      return decodePng(await pngBytes(await Image({ params: Promise.resolve({ id: VALID_ID }) })));
+    };
+    const isViolet = ([r, g, b]: Rgb): boolean => b - g > 40 && b > r;
+    const isLightGrey = ([r, g, b]: Rgb): boolean => r > 150 && Math.abs(r - g) < 8 && Math.abs(g - b) < 8;
+
+    /** x range and y range of the pixels matching `match` in the top row band, x in [x0, x1). */
+    function extent(png: DecodedPng, match: (px: Rgb) => boolean, x0: number, x1: number) {
+      let minX = Infinity;
+      let maxX = -1;
+      let minY = Infinity;
+      let maxY = -1;
+      for (let y = 40; y < 140; y++) {
+        for (let x = x0; x < x1; x++) {
+          if (!match(pixelAt(png, x, y))) continue;
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      }
+      return { minX, maxX, minY, maxY };
+    }
+
+    const CASES: ReadonlyArray<readonly [string, Partial<ClusterDetail["cluster"]>, ClusterDetail["wire"]]> = [
+      [
+        "532ee77c: 3 texts, 8 votes",
+        { article_count: 9, is_blindspot: false, blindspot_side: null, bias_distribution: DIST_532EE77C },
+        { isWireRedistribution: true, effectiveArticleCount: 3, memberCount: 9 },
+      ],
+      [
+        "the widest pair: 2-digit counts under the blindspot ribbon (12 texts, 20 members, 13 votes)",
+        { article_count: 20, bias_distribution: { ...DIST_532EE77C, pro_government: 11, gov_leaning: 2, center: 0 } },
+        { isWireRedistribution: true, effectiveArticleCount: 12, memberCount: 20 },
+      ],
+    ];
+
+    it.each(CASES)("%s: the pill and the violet badge sit on one row inside the canvas padding", async (_label, cluster, wire) => {
+      const card = await render(cluster, wire);
+      // The reference is the same cluster as a plain card: the page gradient over the right padding.
+      const plain = await render(cluster, { ...wire, isWireRedistribution: false });
+
+      const violet = extent(card, isViolet, 0, 1200);
+      expect(violet.maxX, "the violet badge rendered").toBeGreaterThan(0);
+      // Nothing runs into the 72 px right padding (the badge's border ends at x=1128).
+      expect(violet.maxX).toBeLessThanOrEqual(1129);
+      for (let y = 60; y < 120; y += 6) {
+        for (let x = 1136; x < 1200; x += 8) {
+          expectNear(pixelAt(card, x, y), pixelAt(plain, x, y), `right padding at (${x},${y})`);
+        }
+      }
+
+      // The pill's text: light grey, right of the wordmark (x < 300) and left of the badge.
+      const pill = extent(card, isLightGrey, 300, violet.minX);
+      expect(pill.maxX, "the pill's text rendered").toBeGreaterThan(0);
+      expect(pill.maxX).toBeLessThan(violet.minX);
+      expect(pill.minX).toBeGreaterThan(300);
+
+      // One row: the two centres (both boxes are align-items:center) agree to a few px.
+      const pillCentre = (pill.minY + pill.maxY) / 2;
+      const violetCentre = (violet.minY + violet.maxY) / 2;
+      expect(Math.abs(pillCentre - violetCentre)).toBeLessThanOrEqual(6);
+      // ... and the badge is not pushed below the pill's own box (no wrap onto a second row).
+      expect(violet.maxY).toBeLessThan(pill.maxY + 24);
+    }, 30_000);
+  });
+
   it("sets the exact edge cache-control header on the real Response", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(blindspotDetail());
     const { default: Image } = await import("./opengraph-image");

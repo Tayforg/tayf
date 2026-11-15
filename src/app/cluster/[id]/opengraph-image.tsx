@@ -12,7 +12,7 @@ import {
   zonePercents,
 } from "@/lib/bias/zone-summary";
 import { displayHeadline } from "@/lib/embed/embed-html";
-import { sourceCountHead } from "@/lib/feeds/zone-line";
+import { wireSourceCountHead } from "@/lib/feeds/zone-line";
 import { formatPctTr } from "@/lib/format/number-tr";
 import { ogSpectrumState } from "@/lib/seo/og-spectrum";
 import {
@@ -220,7 +220,7 @@ export default async function Image({ params }: ImageProps) {
   // (`partitionByVote`, as `nonVotingMembers` in page.tsx), one per source, and
   // only when no voting source is among the members: the page prints "yalnızca
   // toplayıcı / niş kaynaklar yazdı" only then (`spectrumCaption`), and so does
-  // this card. The pill (`sourceCountHead`) is not touched.
+  // this card. The pill (`wireSourceCountHead`) is not touched.
   const { voting: votingMembers, nonVoting: nonVotingMembers } =
     partitionByVote(members);
   const nonVotingSourceCount =
@@ -350,7 +350,7 @@ export default async function Image({ params }: ImageProps) {
                 color: "#e4e4e7",
               }}
             >
-              {sourceCountHead(wire.effectiveArticleCount, zones)}
+              {wireSourceCountHead(wire.effectiveArticleCount, zones, wire.isWireRedistribution)}
             </div>
             {/* wire-redistribution: violet, not amber — amber is reserved
                 for the Kör nokta ribbon below so the two claims never

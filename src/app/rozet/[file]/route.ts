@@ -60,6 +60,9 @@ export async function GET(_req: Request, { params }: RouteContext): Promise<Resp
     // badge carries the "not compared with Turkish sources" qualifier; the SVG
     // still holds only counts and fixed strings.
     languageIsolated: isLanguageIsolatedCluster(detail.members.map((m) => m.source)),
+    // h190-share-1: a wire redistribution counts distinct texts while every
+    // classified member votes, so the badge names the votes when they exceed it.
+    isWire: detail.wire.isWireRedistribution,
   });
   return new Response(svg, { status: 200, headers: OK_HEADERS });
 }

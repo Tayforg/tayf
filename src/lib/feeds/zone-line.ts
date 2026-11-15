@@ -100,7 +100,9 @@ export function formatZoneLine(counts: Record<MediaDnaZone, number>): string {
  * `counts`, the voting tally.
  *
  * When the zones add up to N or more there is nothing to qualify (a stale or
- * synthetic tally can exceed the member list): the bare count is kept.
+ * synthetic tally can exceed the member list): the bare count is kept. The
+ * share surfaces (embed, rozet, OG pill) print a wire redistribution's head
+ * through `wireSourceCountHead`, which names the votes in that case.
  */
 export function sourceCountHead(
   total: number,
@@ -109,4 +111,30 @@ export function sourceCountHead(
   const voting = ZONE_ORDER.reduce((sum, zone) => sum + counts[zone], 0);
   if (voting >= total) return `${total} kaynak`;
   return `${total} kaynak (${voting} sınıflandırılmış)`;
+}
+
+/**
+ * `sourceCountHead` for the share surfaces (embed percent legend, rozet badge,
+ * OG pill; the embed's English-only legend keeps `sourceCountHead`): a wire
+ * redistribution counts its DISTINCT TEXTS (`total` is
+ * wire.effectiveArticleCount) while every classified member still votes, so M
+ * can exceed N ('3 kaynak' beside %50/%50, from 4 + 4 votes). When `isWire` and
+ * the votes exceed a non-zero `total` the head names them in the text-context
+ * form 'N kaynak · M sınıflandırılmış'. That form is exactly as long as the
+ * parenthesised one ('3 kaynak (2 sınıflandırılmış)'), so the embed's layout
+ * budget holds. Every other case is `sourceCountHead`'s, byte for byte: a
+ * non-wire cluster keeps its stale-tally rule, and so do the RSS, social,
+ * takip, digest, blindspots-feed, card and weekly callers, which do not use
+ * this helper.
+ */
+export function wireSourceCountHead(
+  total: number,
+  counts: Record<MediaDnaZone, number>,
+  isWire: boolean,
+): string {
+  const voting = ZONE_ORDER.reduce((sum, zone) => sum + counts[zone], 0);
+  if (isWire && total > 0 && voting > total) {
+    return `${total} kaynak · ${voting} sınıflandırılmış`;
+  }
+  return sourceCountHead(total, counts);
 }

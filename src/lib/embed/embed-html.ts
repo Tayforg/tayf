@@ -7,7 +7,7 @@ import {
   zonePercents,
 } from "@/lib/bias/zone-summary";
 import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
-import { sourceCountHead } from "@/lib/feeds/zone-line";
+import { sourceCountHead, wireSourceCountHead } from "@/lib/feeds/zone-line";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import { cutAtWord } from "@/lib/seo/og-title";
 import {
@@ -67,11 +67,21 @@ export interface EmbedModel {
    * wire.effectiveArticleCount: the deduped member count for a normal
    * cluster, the distinct-text count for a wire redistribution. The legend
    * qualifies it with the classified count ("N kaynak (M sınıflandırılmış)")
-   * only when `total` (the voting count) is smaller. For a wire cluster whose
-   * votes exceed this count the legend stays a plain "N kaynak", a known gap
-   * against buildShareText's "M sınıflandırılmış haber" left for a follow-up.
+   * only when `total` (the voting count) is smaller. In the percent legend, for
+   * a wire cluster whose votes exceed this count (`isWire`) it says "N kaynak ·
+   * M sınıflandırılmış" (h190-share-1), the text-context form of
+   * buildShareText's "M sınıflandırılmış haber". Any other cluster whose votes
+   * exceed it (a stale tally) keeps the plain "N kaynak", and so does the
+   * English-only legend, which never uses the wire head.
    */
   sourceCount: number;
+  /**
+   * h190-share-1: `wire.isWireRedistribution`. Decides the percent legend's
+   * count head for a cluster whose votes exceed `sourceCount`
+   * (`wireSourceCountHead`); the English-only legend does not read it.
+   * Optional so a model built before the field existed stays a non-wire one.
+   */
+  isWire?: boolean;
   ribbon: string | null;
   /** UTM-tagged cluster URL (raw; escaped on render). */
   href: string;
@@ -202,6 +212,7 @@ export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedMod
     percents: zonePercents(counts),
     total: counts.iktidar + counts.bagimsiz + counts.muhalefet,
     sourceCount: wire.effectiveArticleCount,
+    isWire: wire.isWireRedistribution === true,
     ribbon: ribbonOf(detail, languageIsolated),
     href: `${base}/cluster/${cluster.id}?utm_source=embed&utm_medium=iframe&utm_campaign=cluster`,
     languageIsolated,
@@ -235,6 +246,9 @@ export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedMod
 // - 120x200 with ribbon (narrow frame, now every width up to 260px: no brand,
 //   15px title, 8px 10px padding, 4px gaps): 2+16+17+37.5+10+48.6 (legend
 //   clamped to 3 lines) +16.2+20 = ~167px <= 200.
+// The English-only legend (qualifier + count head) is outside the 2-line budget
+// above: its pre-existing "N kaynak (M sınıflandırılmış)" form still wraps to 3
+// lines at 261-285px wide with a ribbon; left for a follow-up.
 // The ribbon and the link never wrap: they ellipsize. The link is left
 // stretched to the full width (no align-self) so its tap target stays wide.
 // The forced-colors rule (last entry) gives the bar a 1px border, but box-sizing:border-box keeps the bar at 10px, so none of the budgets above change.
@@ -284,7 +298,13 @@ function legendOf(model: EmbedModel): string {
   }
   // h118-shares-1: an all-English cluster prints the page's qualifier where the
   // zone percents were (they would read as "Bağımsız %0 · Muhalefet %0"); the
-  // count keeps the classified-basis wording.
+  // count keeps the classified-basis wording. h190-share-1: this legend
+  // deliberately keeps `sourceCountHead`, never the wire head, for two reasons.
+  // It prints no zone percents, so there is no count/percent mismatch to name.
+  // And its qualifier is already 65 characters: the longer wire head ("N kaynak
+  // · M sınıflandırılmış") wraps it to 3 lines at 261-285px wide by 188-200px
+  // tall with a ribbon, which squeezes and clips the h1 (measured in headless
+  // Chrome).
   if (model.languageIsolated) {
     return `${ENGLISH_ONLY_LEGEND_HEAD} · ${sourceCountHead(model.sourceCount, model.counts)}`;
   }
@@ -292,7 +312,9 @@ function legendOf(model: EmbedModel): string {
   // The percents are over the classified (voting) sources only while the count
   // is every member, so name the basis the way the share text / RSS do:
   // 'N kaynak (M sınıflandırılmış)' when M < N, plain 'N kaynak' otherwise.
-  return `${zones} · ${sourceCountHead(model.sourceCount, model.counts)}`;
+  // h190-share-1: a wire redistribution counts distinct texts, so its votes can
+  // exceed N: 'N kaynak · M sınıflandırılmış' (as long as the parenthesised form).
+  return `${zones} · ${wireSourceCountHead(model.sourceCount, model.counts, model.isWire === true)}`;
 }
 
 function ariaLabelOf(model: EmbedModel): string {
