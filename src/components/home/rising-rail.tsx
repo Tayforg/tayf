@@ -28,6 +28,10 @@ import { getRisingEntities } from "@/lib/trends/rising-query";
 // page mounts it in a Suspense of its own with a null fallback, so a slow rising read cannot delay
 // the feed either. A hookless server component: no client JavaScript.
 //
+// Landmark (h192-a11y-2). The rail sits inside <main>, between story sections, so it is a named
+// <section> region (the h2 names it through aria-labelledby), not an <aside>: a complementary
+// landmark must be top level, and landmark navigation listed one nested in the feed.
+//
 // Layout. One row that wraps (flex-wrap), growing downward on a phone instead of scrolling. Each
 // chip is the class of EntityHubChips: 44 px tall on a phone (max-sm:min-h-11), 24 px from sm up
 // (WCAG 2.5.8). No link prefetches (#291): a hub is a DB-backed read, and this rail sits on the
@@ -65,9 +69,9 @@ export async function RisingRail({ data }: { data: Promise<RisingItem[] | null> 
   if (items === null || items.length === 0) return null;
 
   return (
-    <aside aria-label="Yükselen konular" className="space-y-3">
+    <section aria-labelledby="yukselen-konular-baslik" className="space-y-3">
       <div className="flex items-center gap-3">
-        <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+        <h2 id="yukselen-konular-baslik" className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Yükselen konular
         </h2>
         <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
@@ -87,6 +91,6 @@ export async function RisingRail({ data }: { data: Promise<RisingItem[] | null> 
           </Link>
         </li>
       </ul>
-    </aside>
+    </section>
   );
 }

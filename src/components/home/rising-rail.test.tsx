@@ -236,23 +236,40 @@ describe("RisingRail: takes its rows from the data prop", () => {
 });
 
 describe("RisingRail: the landmark", () => {
-  it("renders one <aside aria-label='Yükselen konular'> with a small h2 in the section-label style", async () => {
+  it("renders one <section aria-labelledby=...> named by a small h2 in the section-label style, and no <aside> (h192-a11y-2)", async () => {
     mockRising = ok([item("msb", "MSB")]);
     allHubsIndexable([item("msb", "MSB")]);
 
     const tree = await rail();
 
-    const asides = collectElements(tree).filter((el) => el.type === "aside");
-    expect(asides).toHaveLength(1);
-    expect(asides[0]!.props?.["aria-label"]).toBe("Yükselen konular");
+    const sections = collectElements(tree).filter((el) => el.type === "section");
+    expect(sections).toHaveLength(1);
     const headings = collectElements(tree).filter((el) => el.type === "h2");
     expect(headings).toHaveLength(1);
     expect(textOf(headings[0])).toBe("Yükselen konular");
+    // The heading names the region: aria-labelledby points at the h2's own id, and there is no aria-label beside it.
+    expect(headings[0]!.props?.id).toBe("yukselen-konular-baslik");
+    expect(sections[0]!.props?.["aria-labelledby"]).toBe(headings[0]!.props?.id);
+    expect(sections[0]!.props?.["aria-label"]).toBeUndefined();
+    // The rail sits inside <main>, where a complementary landmark must not be nested (axe landmark-complementary-is-top-level).
+    expect(collectElements(tree).filter((el) => el.type === "aside")).toHaveLength(0);
     for (const token of ["font-serif", "text-sm", "font-semibold", "uppercase", "tracking-wider", "text-muted-foreground"]) {
       expect(tokens(headings[0]!)).toContain(token);
     }
+    expect(tokens(sections[0]!)).toEqual(["space-y-3"]);
     // No other heading level: the page outline stays h1 > h2 (section) > h3 (story).
     expect(collectElements(tree).filter((el) => el.type === "h1" || el.type === "h3")).toHaveLength(0);
+  });
+
+  it("the served markup has the named region and no <aside>", async () => {
+    mockRising = ok([item("msb", "MSB")]);
+    allHubsIndexable([item("msb", "MSB")]);
+
+    const html = renderToStaticMarkup((await rail()) as ReactNode);
+
+    expect(html).not.toContain("<aside");
+    expect(html).toContain('<section aria-labelledby="yukselen-konular-baslik"');
+    expect(html).toContain('<h2 id="yukselen-konular-baslik"');
   });
 
   it("lists the chips in one <ul>, one <li> per link", async () => {

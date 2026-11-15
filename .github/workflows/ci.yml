@@ -144,7 +144,9 @@ jobs:
   # setup error, a failed test, a file with no passing test or an unexpected skip.
   live-db:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 25, not 15: the suite takes 9-12 min on a typical runner, but a slow runner (about 1.65x, seen
+    # 2026-11-15) needs about 16 min, and a cancelled job reads as a failure.
+    timeout-minutes: 25
     # Mirrors the `check` job: read-only, so least-privilege token.
     permissions:
       contents: read

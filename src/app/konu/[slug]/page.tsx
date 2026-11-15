@@ -276,6 +276,10 @@ export default async function TopicHubPage({
             )}
           </section>
 
+          {/* h192-a11y-1: the group heading of the story list (h1 page, h2
+              section, h3 story, as on home and /blindspots). Screen-reader
+              only, so the page looks the same. */}
+          <h2 className="sr-only">Haberler</h2>
           <div className={listClass}>
             {result.bundles.map((b, i) => {
               const hoursAgo =
@@ -288,6 +292,7 @@ export default async function TopicHubPage({
                   articles={b.articles}
                   sources={b.sources}
                   index={i}
+                  headingLevel={3}
                   isAging={hoursAgo > 48}
                   isWireRedistribution={b.isWireRedistribution}
                   effectiveArticleCount={b.effectiveArticleCount}

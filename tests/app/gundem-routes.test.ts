@@ -493,8 +493,13 @@ describe("/gundem/[key] body", () => {
     expect(text).toContain("Listelenen haberlerin kaynak dağılımı");
     expect(robotsMetas(tree)).toHaveLength(0);
 
+    // h192-a11y-1: two h2s, in this order: the stats heading, then the
+    // screen-reader-only group heading of the story list (the cards are h3).
     const h2 = elements(tree, (el) => el.type === "h2");
-    expect(h2).toHaveLength(1);
+    expect(h2).toHaveLength(2);
+    expect(h2[0]!.props!.id).toBe("entity-spectrum-heading");
+    expect(h2[1]!.props!.className).toBe("sr-only");
+    expect(h2[1]!.props!.children).toBe("Haberler");
 
     const spectrum = elements(
       tree,
@@ -519,6 +524,8 @@ describe("/gundem/[key] body", () => {
     ]);
     expect(cards.map((c) => c.props!.index)).toEqual([0, 1, 2]);
     expect(cards.every((c) => typeof c.props!.isAging === "boolean")).toBe(true);
+    // h192-a11y-1: every story headline is an h3 under the 'Haberler' h2.
+    expect(cards.every((c) => c.props!.headingLevel === 3)).toBe(true);
   });
 
   it("ok: does not claim a truncation when everything is listed", async () => {

@@ -13,6 +13,7 @@ import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import { sourceCountHead } from "@/lib/feeds/zone-line";
 import { pickHeroCandidates } from "@/lib/images/hero-candidates";
+import { cardAgeParts, type CardAgeBasis } from "@/lib/search/card-age";
 import {
   ENGLISH_ONLY_SPECTRUM_LINE,
   headlineLang,
@@ -123,6 +124,14 @@ interface ClusterCardProps {
    * (h67-landmarks-1). Every other caller keeps the 2.
    */
   headingLevel?: 2 | 3;
+  /**
+   * Which timestamp the age pill counts from: "first" (default, the age of
+   * first_published, what every list prints) or "updated" (the newest-first
+   * archive list alone, whose order is updated_at: the pill then reads
+   * "Güncellendi 2 saat önce", so the times run newest-first;
+   * h192-yeni-1). Only the home page's archive list passes "updated".
+   */
+  ageBasis?: CardAgeBasis;
 }
 
 const MAX_VISIBLE_ARTICLES = 4;
@@ -320,6 +329,8 @@ interface ClusterMetaBadgesProps {
   articleCount: number;
   firstPublished: string;
   updatedAt: string;
+  /** See ClusterCardProps.ageBasis. */
+  ageBasis: CardAgeBasis;
   isBlindspot: boolean;
   isWireRedistribution?: boolean;
   effectiveArticleCount?: number;
@@ -346,6 +357,8 @@ interface ClusterMetaBadgesProps {
 function ClusterMetaBadges({
   articleCount,
   firstPublished,
+  updatedAt,
+  ageBasis,
   isBlindspot,
   isWireRedistribution,
   effectiveArticleCount,
@@ -355,6 +368,9 @@ function ClusterMetaBadges({
   id,
 }: ClusterMetaBadgesProps) {
   const countTitle = cardSourceCountTitle(effectiveArticleCount ?? articleCount, distribution);
+  // The age pill: "first" is the plain age of first_published (no prefix, no title), "updated" the age of updated_at behind
+  // "Güncellendi " with the first story's age as the title (h192-yeni-1).
+  const parts = cardAgeParts({ basis: ageBasis, firstPublished, updatedAt, nowMs });
 
   return (
     <div id={id} className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -366,15 +382,21 @@ function ClusterMetaBadges({
         {cardSourceCountLabel(effectiveArticleCount ?? articleCount, distribution)}
       </span>
 
-      <span className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground">
+      <span
+        className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground"
+        title={parts.title}
+      >
         <Clock className="h-3 w-3" />
         {/* A cached page passes nowMs (its read's own clock), so its age is
             re-based to the reader's clock after mount (h34-perf-1). A page
             that renders per request omits it and keeps the server string. */}
         {nowMs === undefined ? (
-          formatTurkishTimeAgo(firstPublished)
+          `${parts.prefix}${formatTurkishTimeAgo(parts.iso)}`
         ) : (
-          <RelativeTime iso={firstPublished} nowMs={nowMs} />
+          <>
+            {parts.prefix || null}
+            <RelativeTime iso={parts.iso} nowMs={nowMs} />
+          </>
         )}
       </span>
 
@@ -417,6 +439,7 @@ export function ClusterCard({
   effectiveArticleCount,
   nowMs,
   headingLevel = 2,
+  ageBasis = "first",
 }: ClusterCardProps) {
   // The headline's tag. The id, lang and className below are written once, so
   // the two levels cannot drift apart (h1-h3 share one rule in globals.css, so
@@ -628,6 +651,7 @@ export function ClusterCard({
                 articleCount={cluster.article_count}
                 firstPublished={cluster.first_published}
                 updatedAt={cluster.updated_at}
+                ageBasis={ageBasis}
                 isBlindspot={false}
                 isWireRedistribution={isWireRedistribution}
                 effectiveArticleCount={effectiveArticleCount}
