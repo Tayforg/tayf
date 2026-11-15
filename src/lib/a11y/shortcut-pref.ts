@@ -23,6 +23,9 @@ export const SHORTCUTS = [
   { keys: ["g", "h"], label: "Ana sayfa", href: "/" },
   { keys: ["g", "b"], label: "Kör noktalar", href: "/blindspots" },
   { keys: ["g", "s"], label: "Kaynaklar", href: "/sources" },
+  { keys: ["g", "t"], label: "Zaman çizelgesi", href: "/timeline" },
+  { keys: ["g", "e"], label: "Ekonomi", href: "/ekonomi" },
+  { keys: ["g", "k"], label: "Kaydedilenler", href: "/saved" },
 ] as const;
 
 /** The two Storage methods the preference needs (also satisfied by test fakes). */
