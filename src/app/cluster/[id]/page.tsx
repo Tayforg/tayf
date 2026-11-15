@@ -1134,11 +1134,20 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             {/* Summary attribution (idea #7): clusters.summary_tr is one
                 outlet's raw RSS description, not Tayf's own words — it must
                 carry a byline. `summary` is null for a blank summary or a
-                bare wire-copy nobody actually wrote (summary-attribution.ts). */}
+                bare wire-copy nobody actually wrote (summary-attribution.ts).
+                The byline is an <h2> (h194-a11y-1), not a <span>: as a span
+                the summary sat in the heading tree under 'Kim önce yazdı?'.
+                Same classes in the same flex row, so nothing moves; the bias
+                badge stays a sibling, outside the heading. globals.css gives
+                every h1-h3 the serif heading font and -0.02em tracking, so the
+                h2 carries font-sans and tracking-normal to keep the old look,
+                as framing-comparison.tsx does. */}
             {summary && (
               <div className="space-y-1">
                 <div className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
-                  <span>{summaryLabel(summary)}</span>
+                  <h2 className="font-sans text-sm font-semibold tracking-normal text-foreground">
+                    {summaryLabel(summary)}
+                  </h2>
                   {summary.source && (
                     <BiasBadge bias={summary.source.bias} size="sm" />
                   )}

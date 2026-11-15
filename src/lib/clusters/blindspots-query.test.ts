@@ -2233,3 +2233,103 @@ describe("getBlindspots wire signal reads the member description (h138-roadmap2-
     expect(payload).not.toContain("Anadolu Ajansının");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h194-wire-1: a compact row carries the wire verdict (isWire,
+// effectiveArticleCount) of its claim so /blindspots and the blindspots feed
+// can print the cluster page's distinct-text count. Only a wire claim gets the
+// keys: a non-wire row stays exactly today's shape.
+// ---------------------------------------------------------------------------
+
+describe("getBlindspots compact rows carry the wire verdict (h194-wire-1)", () => {
+  const LEAD =
+    "Anadolu Ajansının edindiği bilgiye göre, Bakanlık yeni düzenlemeyi yarından itibaren uygulamaya koyacağını açıkladı.";
+
+  /** `mkClaimRow` (6 iktidar + 1 bağımsız voter) with every member on one agency lead and its own hash. */
+  function mkWireClaimRow(id: string) {
+    const row = mkClaimRow(id, "iktidar", 6, 1, "2026-11-04T08:00:00.000Z");
+    return {
+      ...row,
+      cluster_articles: row.cluster_articles.map((ca, i) => ({
+        articles: { ...ca.articles, content_hash: `hash-${id}-${i}`, description: LEAD },
+      })),
+    };
+  }
+
+  /** 30 claims at 100% take the 30 cards, so the 86% claim handed in is the one compact row. */
+  function seedWithOneCompactRow(slim: { id: string }) {
+    seedRows([
+      ...Array.from({ length: 30 }, (_, i) =>
+        mkClaimRow(`ik-${i}`, "iktidar", 7, 0, `2026-11-05T12:${String(i).padStart(2, "0")}:00.000Z`),
+      ),
+      slim,
+    ]);
+  }
+
+  it("a wire claim that lands in `more` yields a row with isWire true and the claim's effective count", async () => {
+    seedWithOneCompactRow(mkWireClaimRow("wire-slim"));
+
+    const { more, bundles } = await getBlindspots();
+
+    expect(bundles.map((b) => b.cluster.id)).not.toContain("wire-slim");
+    expect(more).toHaveLength(1);
+    const row = more[0]!;
+    expect(row.id).toBe("wire-slim");
+    expect(row.isWire).toBe(true);
+    // Seven members on one lead: one text. The member count stays the raw one.
+    expect(row.effectiveArticleCount).toBe(1);
+    expect(row.sourceCount).toBe(7);
+    expect(row.votingZoneCounts).toEqual({ iktidar: 6, bagimsiz: 1, muhalefet: 0 });
+  });
+
+  it("the row's verdict is the card's verdict for the same claim (one detection, two shapes)", async () => {
+    seedRows([mkWireClaimRow("same-claim")]);
+    const asCard = (await getBlindspots()).bundles[0]!;
+    expect(asCard.cluster.id).toBe("same-claim");
+
+    __resetCacheResilienceForTests();
+    seedWithOneCompactRow(mkWireClaimRow("same-claim"));
+    const asRow = (await getBlindspots()).more[0]!;
+
+    expect(asRow.id).toBe("same-claim");
+    expect(asRow.isWire).toBe(asCard.isWireRedistribution);
+    expect(asRow.effectiveArticleCount).toBe(asCard.effectiveArticleCount);
+  });
+
+  it("a non-wire claim's row has NEITHER key, so today's fixtures keep matching", async () => {
+    seedWithOneCompactRow(mkClaimRow("plain-slim", "iktidar", 6, 1, "2026-11-04T08:00:00.000Z"));
+
+    const { more } = await getBlindspots();
+
+    expect(more).toHaveLength(1);
+    const row = more[0]!;
+    expect(row.id).toBe("plain-slim");
+    expect("isWire" in row).toBe(false);
+    expect("effectiveArticleCount" in row).toBe(false);
+    expect(Object.keys(row).sort()).toEqual([
+      "dominantPct",
+      "dominantZone",
+      "firstPublished",
+      "id",
+      "recallMatchedZones",
+      "sourceCount",
+      "title",
+      "updatedAt",
+      "votingZoneCounts",
+    ]);
+  });
+
+  it("the keys survive the cache payload round trip (JSON)", async () => {
+    seedWithOneCompactRow(mkWireClaimRow("wire-json"));
+
+    const roundTripped = JSON.parse(JSON.stringify(await getBlindspots())) as {
+      more: Array<{ id: string; isWire?: boolean; effectiveArticleCount?: number }>;
+    };
+
+    expect(roundTripped.more[0]).toMatchObject({
+      id: "wire-json",
+      isWire: true,
+      effectiveArticleCount: 1,
+    });
+  });
+});

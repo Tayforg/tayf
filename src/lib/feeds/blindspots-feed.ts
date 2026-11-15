@@ -11,7 +11,12 @@ import {
   withUtm,
   type RssItemInput,
 } from "@/lib/feeds/rss-builder";
-import { formatZoneLine, sourceCountHead } from "@/lib/feeds/zone-line";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
+import {
+  formatZoneLine,
+  sourceCountHead,
+  wireSourceCountHead,
+} from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 import type { MediaDnaZone } from "@/types";
 
@@ -37,10 +42,18 @@ interface FeedClaim {
   id: string;
   title: string;
   pubDate: string;
-  /** Every member, as the card's "N kaynak". */
+  /** Every member, as the card's "N kaynak" (a wire claim prints `effectiveArticleCount` there instead). */
   sourceCount: number;
   dominantZone: MediaDnaZone;
   votingZoneCounts: Record<MediaDnaZone, number>;
+  /**
+   * h194-wire-1: the claim is a wire redistribution. With `effectiveArticleCount`
+   * (its distinct texts) the item prints the cluster page's "N kaynak" and the
+   * wire note instead of the raw member count. Optional: a compact row cached
+   * before the fields existed has neither and reads as a plain claim.
+   */
+  isWire?: boolean;
+  effectiveArticleCount?: number;
 }
 
 function claimRssItem(base: string, claim: FeedClaim): RssItemInput {
@@ -57,16 +70,26 @@ function claimRssItem(base: string, claim: FeedClaim): RssItemInput {
   // it differ, so the zones add up to what is printed. dominantPct is only the
   // sort key, never copy.
   const zoneLine = formatZoneLine(claim.votingZoneCounts);
-  const head = sourceCountHead(claim.sourceCount, claim.votingZoneCounts);
   const pct = dominantZonePercent(claim.votingZoneCounts, claim.dominantZone);
   const prefix = `Kör nokta: ağırlıkla ${ZONE_KAYNAKLAR[claim.dominantZone]} (%${pct}). `;
+
+  // h194-wire-1: a wire redistribution is counted in distinct texts, as on the
+  // cluster page, the embed and /rss.xml: "N kaynak" is its effective count
+  // (naming the classified votes when they outnumber it) and the wire note
+  // closes the description, in the shape /rss.xml gives it. Anything else, and
+  // a wire claim with no usable text count, is the line it always was.
+  const effective = claim.effectiveArticleCount;
+  const description =
+    claim.isWire === true && effective !== undefined && effective > 0
+      ? `${prefix}${wireSourceCountHead(effective, claim.votingZoneCounts, true)} · ${zoneLine}. ${wireBadgeLabel(claim.sourceCount, effective)}.`
+      : `${prefix}${sourceCountHead(claim.sourceCount, claim.votingZoneCounts)} · ${zoneLine}`;
 
   return {
     title: claim.title,
     link,
     guid: `${base}/cluster/${claim.id}`,
     pubDate: claim.pubDate,
-    description: `${prefix}${head} · ${zoneLine}`,
+    description,
   };
 }
 
@@ -81,6 +104,8 @@ export function blindspotRssItem(
     sourceCount: bundle.sources.length,
     dominantZone: bundle.dominantZone,
     votingZoneCounts: bundle.votingZoneCounts,
+    isWire: bundle.isWireRedistribution,
+    effectiveArticleCount: bundle.effectiveArticleCount,
   });
 }
 
@@ -102,6 +127,8 @@ export function blindspotMoreRssItem(
     sourceCount: row.sourceCount,
     dominantZone: row.dominantZone,
     votingZoneCounts: row.votingZoneCounts,
+    isWire: row.isWire,
+    effectiveArticleCount: row.effectiveArticleCount,
   });
 }
 

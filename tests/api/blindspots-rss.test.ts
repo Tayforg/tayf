@@ -265,3 +265,79 @@ describe("GET /blindspots/rss.xml", () => {
     expect(res.headers.get("Content-Type")).toContain("text/plain");
   });
 });
+
+// h194-wire-1: /blindspots/rss.xml and /rss/kor-noktalar.xml share
+// blindspotsFeedResponse, so a wire claim reads the same on both URLs: the
+// distinct-text count, the classified votes and the wire note (the raw '14
+// kaynak (13 sınıflandırılmış)' contradicted the cluster page's '7 kaynak').
+describe("wire-redistribution claims on both blindspot feed URLs (h194-wire-1)", () => {
+  const WIRE_CARD_DESCRIPTION =
+    "Kör nokta: ağırlıkla İktidar kaynakları (%84). 7 kaynak · 13 sınıflandırılmış · İktidar 11 · Bağımsız 1 · Muhalefet 1. Ajans ağırlıklı · 14 haber, 7 farklı metin.";
+  const WIRE_ROW_DESCRIPTION =
+    "Kör nokta: ağırlıkla İktidar kaynakları (%83). 2 kaynak · 6 sınıflandırılmış · İktidar 5 · Bağımsız 1 · Muhalefet 0. Ajans ağırlıklı · 6 haber, 2 farklı metin.";
+
+  function wireData() {
+    return {
+      bundles: [
+        bundle({
+          dominantPct: 11 / 13,
+          sources: Array.from({ length: 14 }, (_, i) => ({
+            id: `w${i}`,
+            name: `W${i}`,
+            bias: "pro_government",
+            kind: "outlet",
+          })),
+          votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+          isWireRedistribution: true,
+          effectiveArticleCount: 7,
+        }),
+      ],
+      more: [
+        {
+          id: "55e2c33a",
+          title: "Kompakt wire",
+          dominantZone: "iktidar",
+          dominantPct: 5 / 6,
+          sourceCount: 6,
+          firstPublished: "2026-09-19T08:00:00.000Z",
+          updatedAt: "2026-09-19T09:00:00.000Z",
+          votingZoneCounts: { iktidar: 5, bagimsiz: 1, muhalefet: 0 },
+          recallMatchedZones: [],
+          isWire: true,
+          effectiveArticleCount: 2,
+        },
+      ],
+    };
+  }
+
+  function descriptions(body: string): string[] {
+    return [...body.matchAll(/<description>(Kör nokta[^<]*)<\/description>/g)].map((m) => m[1]!);
+  }
+
+  async function callKorNoktalar() {
+    const { GET } = await import("@/app/rss/[topic]/route");
+    return GET(new Request("https://tayfhaber.com/rss/kor-noktalar.xml"), {
+      params: Promise.resolve({ topic: "kor-noktalar.xml" }),
+    });
+  }
+
+  it("/blindspots/rss.xml prints the wire description for a card and a compact row", async () => {
+    mocks.blindspots = wireData();
+    const body = await (await callRoute()).text();
+    expect(descriptions(body)).toEqual([WIRE_CARD_DESCRIPTION, WIRE_ROW_DESCRIPTION]);
+    expect(body).not.toContain("14 kaynak");
+  });
+
+  it("/rss/kor-noktalar.xml prints exactly the same descriptions", async () => {
+    mocks.blindspots = wireData();
+    const body = await (await callKorNoktalar()).text();
+    expect(descriptions(body)).toEqual([WIRE_CARD_DESCRIPTION, WIRE_ROW_DESCRIPTION]);
+  });
+
+  it("the two URLs stay identical apart from the self link", async () => {
+    mocks.blindspots = wireData();
+    const a = await (await callRoute()).text();
+    const b = await (await callKorNoktalar()).text();
+    expect(a.replace("/blindspots/rss.xml", "/rss/kor-noktalar.xml")).toBe(b);
+  });
+});

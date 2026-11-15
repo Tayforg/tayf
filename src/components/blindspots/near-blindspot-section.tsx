@@ -31,6 +31,25 @@ export function nearBlindspotCountLabel(
     : `${votingTotal} kaynak`;
 }
 
+/**
+ * h194-wire-1: the count label of a WIRE claim's compact row on /blindspots.
+ * The cluster page prints the claim's distinct texts as "N kaynak" (`effective`,
+ * the cluster's effectiveArticleCount) while every classified member still
+ * votes, so the row prints that number and names the votes counted beside it
+ * ("7 kaynak · 13 sayıldı"), or one number when the two agree. The texts are not
+ * capped by the votes: 7 texts behind 6 votes prints both rather than the
+ * smaller number. `nearBlindspotCountLabel` stays the label of every non-wire row
+ * and of the "Kör noktaya yakın" list.
+ */
+export function wireMoreRowCountLabel(
+  effective: number,
+  votingTotal: number,
+): string {
+  return effective === votingTotal
+    ? `${votingTotal} kaynak`
+    : `${effective} kaynak · ${votingTotal} sayıldı`;
+}
+
 export function NearBlindspotList({ items }: { items: NearBlindspotItem[] | null }) {
   if (items === null || items.length === 0) return null;
 

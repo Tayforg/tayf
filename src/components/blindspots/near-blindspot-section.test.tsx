@@ -4,7 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 // House pattern: see silence-digest-band.test.tsx. The list is a plain server
 // component (no client hooks), so renderToStaticMarkup needs no mocking.
-import { NearBlindspotList, nearBlindspotCountLabel } from "./near-blindspot-section";
+import {
+  NearBlindspotList,
+  nearBlindspotCountLabel,
+  wireMoreRowCountLabel,
+} from "./near-blindspot-section";
 import { balanceFromZoneCounts } from "@/lib/bias/balance";
 import { BLINDSPOT, ZONE_META } from "@/lib/bias/config";
 import type { NearBlindspotItem } from "@/lib/clusters/near-blindspots-query";
@@ -213,5 +217,31 @@ describe("nearBlindspotCountLabel", () => {
 
   it("falls back to the voting total when the member count is somehow smaller", () => {
     expect(nearBlindspotCountLabel(10, 12)).toBe("12 kaynak");
+  });
+});
+
+// h194-wire-1: a wire claim's compact row prints the cluster page's number (the
+// distinct texts) next to the votes that were counted. `nearBlindspotCountLabel`
+// above is untouched: it serves the "Kör noktaya yakın" list and every non-wire row.
+describe("wireMoreRowCountLabel (h194-wire-1)", () => {
+  it("names both numbers when the classified votes differ from the texts: 7 texts, 13 votes", () => {
+    expect(wireMoreRowCountLabel(7, 13)).toBe("7 kaynak · 13 sayıldı");
+  });
+
+  it("2 texts behind 6 votes", () => {
+    expect(wireMoreRowCountLabel(2, 6)).toBe("2 kaynak · 6 sayıldı");
+  });
+
+  it("prints a single number when the texts and the votes agree", () => {
+    expect(wireMoreRowCountLabel(6, 6)).toBe("6 kaynak");
+  });
+
+  it("never prints a smaller number than what was counted, even when the texts exceed the votes", () => {
+    expect(wireMoreRowCountLabel(7, 6)).toBe("7 kaynak · 6 sayıldı");
+  });
+
+  it("does not change what the near-blindspot label prints for the same pair of numbers", () => {
+    expect(nearBlindspotCountLabel(14, 13)).toBe("14 kaynak · 13 sayıldı");
+    expect(nearBlindspotCountLabel(6, 6)).toBe("6 kaynak");
   });
 });
