@@ -41,6 +41,8 @@
 // below them about what a query means. Folding is applied to the query tokens
 // and to the title alike; the word-start rule is unchanged.
 
+import type { SearchSort } from "@/lib/search/search-sort";
+import { rankWord } from "@/lib/search/search-status";
 import { aliasTermForms, expandAliasQuery } from "./search-aliases";
 import {
   SLASH_BETWEEN_LETTERS,
@@ -290,12 +292,19 @@ export function titleMatchesTokens(
  * number of ids, ranked by relevance; when it returned that many, the list is
  * the best matches rather than all of them, and the heading says so.
  */
-export function archiveHeading(count: number, capped: boolean, archivePage = 1): string {
+export function archiveHeading(
+  count: number,
+  capped: boolean,
+  archivePage = 1,
+  sort?: SearchSort | null,
+): string {
+  // h191: the word follows the order shown ("en ilgili" for the ranked order, "en yeni" for ?sirala=yeni).
+  const word = rankWord(sort);
   // h170-roadmap-1: a later page of the ranking (?arsiv=N) names its page; its rows are that page's, not a count.
   if (Number.isInteger(archivePage) && archivePage >= 2) {
-    return `Arşivden: en ilgili sonuçlar (${archivePage}. sayfa)`;
+    return `Arşivden: ${word} sonuçlar (${archivePage}. sayfa)`;
   }
   return capped
-    ? `Arşivden: en ilgili ${count} sonuç`
+    ? `Arşivden: ${word} ${count} sonuç`
     : `Arşivden: ${count} sonuç`;
 }

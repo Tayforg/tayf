@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
+import { SEARCH_SORT_NEW, type SearchSort } from "@/lib/search/search-sort";
 import { ARCHIVE_MAX_PAGE } from "@/lib/seo/home-canonical";
 import { createReaderClient } from "@/lib/supabase/server";
 import { expandAliasQuery } from "./search-aliases";
@@ -83,6 +84,18 @@ import {
 // so at most 3 entries per query are added, and it takes a slot of the same in-flight cap. PGRST202 on v2
 // (211 not applied yet) is `{ ok: false, unavailablePage: true }`, memoised for `minutes` only.
 //
+// The newest-first order (h191, `?sirala=yeni`). `searchClusters(q, archivePage, "yeni")` reads EVERY archive page (1 to
+// ARCHIVE_MAX_PAGE) from migration 215's `search_cluster_ids_new` with page 1's typed `p_variants` and `p_folded`, `p_limit`
+// SEARCH_LIMIT and `p_offset` (page - 1) * SEARCH_LIMIT: the newest clusters whose display title literally holds the
+// query, newest first. It is ONE call (no sibling, no locative: a merged list has no offset to page by), so page 1 reports
+// `typedFull` when it was full, and the result carries `newest: true`, which is what the page words its headings and marks
+// its toggle by. Only the exact value "yeni" selects it; any other value, or none, is the ranked order above, whose calls,
+// cache entries and results are not touched. The new order has a cache function of its own (`cachedSearchClustersNewest`,
+// the page is part of its key: at most 4 entries per query), so ranked page 1 keeps its one-argument key.
+// If the function is missing (PGRST202: 215 is not applied yet), errors or throws, that request is answered in the RANKED
+// order (page 1 as the ranked page 1, a later page as the ranked later page), logged once without the reader's text, and
+// memoised for `minutes` only so applying 215 heals it soon. It never throws.
+//
 // Deploy order: if the app ships before migration 129, PostgREST answers
 // PGRST202 for the 3-arg call and `fetchSearchClusters` falls back once to
 // 083's 2-arg function (no folding, no ranking), so there is no outage.
@@ -118,8 +131,11 @@ export const MAX_IN_FLIGHT_SEARCHES = 4;
 // SEARCH_LIMIT ids, so no sibling or locative call ran and page 2 of the same
 // typed ranking continues this page (h170-roadmap-1). `unavailablePage` = a later
 // page whose function is not in the schema cache yet (migration 211 unapplied).
+// `newest` (h191, set only when true) = the rows are the newest-first order of
+// migration 215's search_cluster_ids_new; a ranked result, and a newest-first
+// request that was answered in the ranked order, never carry it.
 export type SearchResult =
-  | { ok: true; bundles: ClusterBundle[]; capped?: boolean; typedFull?: true }
+  | { ok: true; bundles: ClusterBundle[]; capped?: boolean; typedFull?: true; newest?: true }
   | { ok: false; unavailablePage?: true };
 
 interface SearchIdRow {
@@ -131,6 +147,9 @@ interface SearchFetch {
   capped: boolean;
   typedFull?: true;
   unavailable?: true;
+  newest?: true;
+  /** A newest-first request answered in the ranked order (215 missing or failing): cached for `minutes` only. */
+  degraded?: true;
 }
 
 // The typed call's arguments, shared by page 1 and every later page so a later page asks for exactly the
@@ -347,6 +366,52 @@ async function fetchSearchPage(key: string, page: number): Promise<SearchFetch> 
   return { bundles, capped: ids.length >= SEARCH_LIMIT };
 }
 
+// The newest-first order (h191), UNCACHED like the two above and THROWING only when even the ranked fallback fails.
+// ONE call to migration 215's `search_cluster_ids_new` with the typed `p_variants` and `p_folded`, `p_limit` SEARCH_LIMIT
+// and `p_offset` (page - 1) * SEARCH_LIMIT, for every page from 1 (no sibling, no locative). A missing function
+// (PGRST202), an error or a thrown exception is never the reader's problem: that request is answered in the RANKED
+// order, page 1 by `fetchSearchClusters` and a later page by `fetchSearchPage`, marked `degraded` so it is memoised for
+// `minutes` only, and logged once. The log line holds the error code and message, never the query (reader-typed
+// input). `capped` = a full page of ids, counted before the visibility filter; page 1 also reports `typedFull`, which
+// is what shows its "Sonraki sonuçlar" link (the next page continues exactly this list).
+// `key` is canonical and length-checked, `page` is 1 to ARCHIVE_MAX_PAGE (searchClusters bounds both).
+async function fetchSearchNewest(key: string, page: number): Promise<SearchFetch> {
+  const { typed, folded } = typedSearchArguments(key);
+  if (typed.length === 0) return { bundles: [], capped: false, newest: true };
+
+  const supabase = createReaderClient();
+  let ids: string[] | null = null;
+  let failure = "";
+  try {
+    const res = await supabase.rpc("search_cluster_ids_new", {
+      p_variants: typed,
+      p_folded: folded,
+      p_limit: SEARCH_LIMIT,
+      p_offset: (page - 1) * SEARCH_LIMIT,
+    });
+    if (res.error) {
+      failure = `${res.error.code ?? "error"}: ${res.error.message}`;
+    } else {
+      ids = ((res.data ?? []) as SearchIdRow[]).map((r) => r.id);
+    }
+  } catch (err) {
+    failure = `thrown: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  if (ids === null) {
+    console.warn(`[clusters] search-query: search_cluster_ids_new unavailable (${failure}), serving the ranked order`);
+    const ranked = page === 1 ? await fetchSearchClusters(key) : await fetchSearchPage(key, page);
+    return { ...ranked, degraded: true };
+  }
+  if (ids.length === 0) return { bundles: [], capped: false, newest: true };
+
+  const { bundles } = await hydrateBundles(supabase, ids, new Set(), []);
+  const full = ids.length >= SEARCH_LIMIT;
+  return page === 1 && full
+    ? { bundles, capped: full, typedFull: true, newest: true }
+    : { bundles, capped: full, newest: true };
+}
+
 // Build-safety: `attemptCached` swallows whatever `fetchSearchClusters`
 // throws instead of letting it cross the `"use cache"` boundary — a throw
 // here fails `next build`'s prerender even when every caller catches (see
@@ -394,6 +459,22 @@ async function cachedSearchClustersPage(key: string, page: number) {
   return r;
 }
 
+// The cache entry of the newest-first order (h191): its own function, so ranked page 1 keeps the one-argument key it
+// always had, and the page is part of this one's key (at most ARCHIVE_MAX_PAGE entries per query). Same rules as above:
+// plain "use cache", `cacheTag` first, one literal `cacheLife` per invocation after the attempt. A newest-first request
+// answered in the ranked order (`degraded`, migration 215 not applied yet) is memoised like a failure, for `minutes`
+// only, so applying 215 heals it within minutes.
+async function cachedSearchClustersNewest(key: string, page: number) {
+  "use cache";
+  cacheTag("clusters-search");
+  const r = await attemptCached("clusters-search", () =>
+    fetchSearchNewest(key, page),
+  );
+  if (r.ok && r.data.degraded !== true) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
+}
+
 // Per-instance load state (module scope: shared by every request this instance
 // serves). `pending` holds the one in-flight search per canonical key;
 // `inFlight` counts the searches running, which equals `pending.size` and is
@@ -405,17 +486,23 @@ let inFlight = 0;
 // a result without them is exactly the object it always was.
 function resultOf(read: SearchFetch): SearchResult {
   if (read.unavailable === true) return { ok: false, unavailablePage: true };
-  return read.typedFull === true
-    ? { ok: true, bundles: read.bundles, capped: read.capped, typedFull: true }
-    : { ok: true, bundles: read.bundles, capped: read.capped };
+  // h191: `newest` rides along only on a newest-first read, so a ranked result is exactly the object it always was.
+  const base =
+    read.typedFull === true
+      ? { ok: true as const, bundles: read.bundles, capped: read.capped, typedFull: true as const }
+      : { ok: true as const, bundles: read.bundles, capped: read.capped };
+  return read.newest === true ? { ...base, newest: true } : base;
 }
 
 // The cached attempt, then (if it failed and the instance has room) one live
 // retry. `inFlight` already counts this search's own slot. `page` 1 is the search
 // it always was; a later page reads through its own cache function and fetch.
-async function runSearch(key: string, page: number): Promise<SearchResult> {
-  const attempt =
-    page === 1 ? await cachedSearchClusters(key) : await cachedSearchClustersPage(key, page);
+async function runSearch(key: string, page: number, newest: boolean): Promise<SearchResult> {
+  const attempt = newest
+    ? await cachedSearchClustersNewest(key, page)
+    : page === 1
+      ? await cachedSearchClusters(key)
+      : await cachedSearchClustersPage(key, page);
   if (attempt.ok) return resultOf(attempt.data);
 
   // A live retry doubles the database work of a failing search. When the
@@ -427,7 +514,13 @@ async function runSearch(key: string, page: number): Promise<SearchResult> {
   }
 
   try {
-    return resultOf(page === 1 ? await fetchSearchClusters(key) : await fetchSearchPage(key, page));
+    return resultOf(
+      newest
+        ? await fetchSearchNewest(key, page)
+        : page === 1
+          ? await fetchSearchClusters(key)
+          : await fetchSearchPage(key, page),
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[clusters] search-query failed: ${message}`);
@@ -458,15 +551,26 @@ function archiveReadPage(archivePage: number): number {
 // on a genuine, still-failing outage. Never throws.
 //
 // `archivePage` (h170-roadmap-1, default 1): page N of the typed ranking, see "Later pages" above.
-// The single-flight key of a later page is the canonical query plus the page behind a NUL, which
-// canonicalSearchQuery strips from every query, so a page key can never equal a page-1 key.
-export async function searchClusters(q: string, archivePage = 1): Promise<SearchResult> {
+// `sort` (h191): only the exact value "yeni" (SEARCH_SORT_NEW) reads the newest-first order, see above; any other value
+// (and none) is the ranked order, whatever it is. The single-flight key of a later page is the canonical query plus the
+// page behind a NUL, which canonicalSearchQuery strips from every query, so a page key can never equal a page-1 key; a
+// newest-first read adds "yeni" between the two NULs, so its key can never equal a ranked one either.
+export async function searchClusters(
+  q: string,
+  archivePage = 1,
+  sort?: SearchSort | null,
+): Promise<SearchResult> {
   const key = canonicalSearchQuery(q);
   if (key.length < MIN_QUERY_LENGTH) {
     return { ok: true, bundles: [] };
   }
   const page = archiveReadPage(archivePage);
-  const flightKey = page === 1 ? key : `${key}\u0000${page}`;
+  const newest = sort === SEARCH_SORT_NEW;
+  const flightKey = newest
+    ? `${key}\u0000${SEARCH_SORT_NEW}\u0000${page}`
+    : page === 1
+      ? key
+      : `${key}\u0000${page}`;
 
   // Single-flight: the check and the registration below run in one synchronous
   // stretch, so two callers can never both start the same key.
@@ -479,7 +583,7 @@ export async function searchClusters(q: string, archivePage = 1): Promise<Search
   }
 
   inFlight++;
-  const search = runSearch(key, page).finally(() => {
+  const search = runSearch(key, page, newest).finally(() => {
     inFlight--;
     pending.delete(flightKey);
   });

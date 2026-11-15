@@ -16,6 +16,7 @@ import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
 import { NewBreakingPill } from "@/components/home/new-breaking-pill";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { RelaxedSearchLinks } from "@/components/home/relaxed-search-links";
+import { SearchSortToggle } from "@/components/home/search-sort-toggle";
 import { RisingRail, loadRisingRail } from "@/components/home/rising-rail";
 import { SearchEcho } from "@/components/search/search-echo";
 import { PageHero } from "@/components/ui/page-hero";
@@ -47,6 +48,12 @@ import { shouldStampLastVisit } from "@/lib/last-visit";
 import { searchIntentLink, type SearchIntent } from "@/lib/search/search-intent";
 import { loadSearchIntent } from "@/lib/search/search-intent-query";
 import { relaxedSearchWords } from "@/lib/search/relaxed-search";
+import {
+  SEARCH_SORT_NEW,
+  parseSearchSort,
+  searchHref,
+  type SearchSort,
+} from "@/lib/search/search-sort";
 import {
   MIN_QUERY_LENGTH,
   archivePagePhrase,
@@ -122,7 +129,7 @@ function searchArchivePage(q: string, raw: string | string[] | undefined): numbe
 export async function generateMetadata({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[] }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[]; sirala?: string | string[] }>;
 }): Promise<Metadata> {
   const { q: qRaw, page: pageRaw, arsiv: arsivRaw } = await searchParams;
   const q = firstQuery(qRaw);
@@ -205,7 +212,7 @@ const HOME_FEED_ID = "haber-akisi";
 export default function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[] }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[]; sirala?: string | string[] }>;
 }) {
   return (
     <>
@@ -300,9 +307,9 @@ async function loadFeed(): Promise<PoliticsClustersResult | null> {
 export async function HomeFeed({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[] }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[]; arsiv?: string | string[]; sirala?: string | string[] }>;
 }) {
-  const { q: qRaw, page: pageRaw, arsiv: arsivRaw } = await searchParams;
+  const { q: qRaw, page: pageRaw, arsiv: arsivRaw, sirala: siralaRaw } = await searchParams;
   const q = firstQuery(qRaw);
   const page = parseHomePage(pageRaw);
 
@@ -325,6 +332,10 @@ export async function HomeFeed({
   // one the parameter is ignored. A page after the first shows that page's archive rows ONLY: the in-feed
   // sections (Son Dakika, the day buckets and their pager) belong to page 1, and arsiv wins over ?page=.
   const archivePage = searchable ? parseArchivePage(arsivRaw) : 1;
+  // h191: the order of the archive results (?sirala=yeni: the newest literal-title matches first, migration 215). Only the
+  // exact value 'yeni' selects it, anything else is the ranked order, and the raw parameter goes nowhere else. Like arsiv it
+  // only counts for a query that is searched.
+  const sort: SearchSort | null = searchable ? parseSearchSort(siralaRaw) : null;
   // h42-search-2: the archive keeps at most MAX_SEARCH_TERMS words and
   // MAX_SEARCH_QUERY_LENGTH characters (a cost bound, h30-abuse-1). When that cut
   // part of what the reader typed, the page says so and echoes only the words the
@@ -370,11 +381,14 @@ export async function HomeFeed({
   // rejects (a failed lookup is null: no row).
   const [feed, search, intent] = await Promise.all([
     loadFeed(),
-    // Page 1 is called exactly as before (the query alone); a later archive page passes its page.
+    // Page 1 is called exactly as before (the query alone); a later archive page passes its page. The newest-first
+    // order (h191) passes its page AND the order, on every page including the first.
     searchable
-      ? archivePage === 1
-        ? searchClusters(q)
-        : searchClusters(q, archivePage)
+      ? sort !== null
+        ? searchClusters(q, archivePage, sort)
+        : archivePage === 1
+          ? searchClusters(q)
+          : searchClusters(q, archivePage)
       : Promise.resolve(null),
     searchable ? loadSearchIntent(q) : Promise.resolve(null),
   ]);
@@ -409,6 +423,15 @@ export async function HomeFeed({
 
   const { bundles, breakingBundles } = feed;
 
+  // h191: the order the rows are SHOWN in (`sort` is the order that was asked for). A newest-first request answered in the
+  // ranked order (migration 215 not applied yet, or the call failed) carries no `newest`, so its wording, its toggle and its
+  // sections say ranked; the links keep the order that was asked for (`sort`), so the next request tries the new order again.
+  // When the newest order IS shown, the list is the archive list alone (review ui-1): the feed's sections (Son Dakika, the day
+  // buckets, their pager) are ranked by feed score, so an older story of the feed would sit above newer archive-only rows, and
+  // pages 2 to 4 (archive rows only) would not continue it. Every RPC row, the ones that are also in the feed included, is listed
+  // in the RPC order, and the count is the archive count.
+  const shownSort: SearchSort | null = search?.ok === true && search.newest === true ? SEARCH_SORT_NEW : null;
+
   // Filter by word-start tokens of the cluster title (in-feed-match.ts):
   // every query word must start a word of the title, in any order, with
   // Turkish casing and dotted/dotless I folded ("ISTANBUL" matches
@@ -431,7 +454,12 @@ export async function HomeFeed({
   // h170-roadmap-2: the filter and the dedupe are splitHomeFeed's, the same helper
   // /api/home/head takes its strip from, so the "yeni son dakika haberi" head and
   // this strip can never drift.
-  const { filteredBreaking, filtered, ranked } = splitHomeFeed(feed, matchesQuery);
+  // h191 (review ui-1): the newest order shows no feed section at all, so nothing is split: with the three lists empty the
+  // strip, the buckets, the in-feed pager and the in-feed ids (so the archive list loses no row) all follow without another branch.
+  const { filteredBreaking, filtered, ranked }: ReturnType<typeof splitHomeFeed> =
+    shownSort !== null
+      ? { filteredBreaking: [], filtered: [], ranked: [] }
+      : splitHomeFeed(feed, matchesQuery);
 
   const totalPages = homeTotalPages(ranked.length);
   // Clamp the requested page so /?page=999 still renders the last page
@@ -517,11 +545,17 @@ export async function HomeFeed({
   // A later archive page names its page instead: one page's rows are not the search's count (h170-roadmap-1).
   const resultPhrase =
     archivePage > 1
-      ? archivePagePhrase(archivePage)
+      ? archivePagePhrase(archivePage, shownSort)
       : resultCountPhrase(
           resultCount,
           view.archiveCappedTotal && !view.archiveUnavailable,
+          shownSort,
         );
+  // h191: "Sırala: En alakalı · En yeni" above the results of a search that has results (or an archive to page), and on a
+  // newest-first search that found nothing, so the reader can go back to the ranked order. Not on a ranked search with
+  // no result (nothing to order), a failed archive search or a query that was not searched.
+  const showSortToggle =
+    searchable && search?.ok === true && (!view.emptySearch || sort !== null);
 
   // We track a global render index across buckets so the first ~3
   // ClusterCards (above the fold) still get the priority hint, even
@@ -575,6 +609,7 @@ export async function HomeFeed({
                   unavailable: view.archiveUnavailable,
                   archivePage,
                   pageUnavailable: view.archivePageUnavailable === true,
+                  sort: shownSort,
                 }),
                 cutNote,
               ]
@@ -622,6 +657,7 @@ export async function HomeFeed({
             <FollowButton kind="q" value={q} />
           </div>
           {intent ? <SearchIntentRow intent={intent} /> : null}
+          {showSortToggle && <SearchSortToggle q={q} active={shownSort} />}
         </>
       )}
 
@@ -685,6 +721,7 @@ export async function HomeFeed({
                 currentPage={safePage}
                 totalPages={totalPages}
                 query={q}
+                sort={sort}
               />
             </>
           )}
@@ -693,7 +730,7 @@ export async function HomeFeed({
             <section className="space-y-3">
               <div className="flex items-center gap-3">
                 <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                  {archiveHeading(view.archive.length, view.archiveCapped, archivePage)}
+                  {archiveHeading(view.archive.length, view.archiveCapped, archivePage, shownSort)}
                 </h2>
                 <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
               </div>
@@ -728,11 +765,13 @@ export async function HomeFeed({
                 page={archivePage}
                 hasNext={view.archiveHasNext === true}
                 end={view.archiveEnd === true}
+                sort={sort}
+                newestShown={shownSort !== null}
               />
             )}
 
           {searchable && view.archivePageUnavailable === true && (
-            <ArchivePageUnavailable q={q} />
+            <ArchivePageUnavailable q={q} sort={sort} />
           )}
 
           {view.archiveUnavailable &&
@@ -747,7 +786,7 @@ export async function HomeFeed({
             ))}
 
           {view.emptySearch && (
-            <EmptySearch query={echoQ} tooShort={tooShort} />
+            <EmptySearch query={echoQ} tooShort={tooShort} sort={sort} newestShown={shownSort !== null} />
           )}
         </>
       )}
@@ -845,10 +884,20 @@ function FeedUnavailable() {
 function EmptySearch({
   query,
   tooShort = false,
+  sort = null,
+  newestShown = false,
 }: {
   query?: string;
   /** The query is below MIN_QUERY_LENGTH: no search ran, so nothing "was not found". */
   tooShort?: boolean;
+  /** The order the search was asked for (h191): the word chips keep ?sirala=yeni. */
+  sort?: SearchSort | null;
+  /**
+   * The newest order was SHOWN (not just asked for: a newest request answered in the ranked order is a ranked zero), review ui-2.
+   * Its literal-title filter is stricter than the ranked order, so a zero here can sit next to ranked results: the card says
+   * which order found nothing and links to the ranked search.
+   */
+  newestShown?: boolean;
 }) {
   const echoed = displayQuery(query) !== "";
   // h185-roadmap2-1: the archive ANDs every typed word, so a long question finds nothing while each of
@@ -862,12 +911,26 @@ function EmptySearch({
         <SearchX className="h-7 w-7" aria-hidden="true" />
       </div>
       <p className="min-w-0 max-w-full font-serif text-sm font-medium text-foreground">
-        {tooShort ? "Aramak için biraz daha yazın" : "Hiç haber bulunamadı"}
+        {tooShort
+          ? "Aramak için biraz daha yazın"
+          : newestShown
+            ? "En yeni sıralamada haber bulunamadı"
+            : "Hiç haber bulunamadı"}
       </p>
       {tooShort ? (
         <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed">
           {`En az ${MIN_QUERY_LENGTH} karakter yazın.`}
         </p>
+      ) : echoed && newestShown ? (
+        <>
+          <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed break-words [overflow-wrap:anywhere]">
+            <SearchEcho q={query} className="text-foreground" />{" "}
+            için başlığında bu ifade geçen haber yok.
+          </p>
+          <Link href={searchHref(query ?? "")} prefetch={false} className={PAGER_LINK_CLASS}>
+            En alakalı sıralamada ara
+          </Link>
+        </>
       ) : echoed ? (
         <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed break-words [overflow-wrap:anywhere]">
           <SearchEcho q={query} className="text-foreground" />{" "}
@@ -878,9 +941,12 @@ function EmptySearch({
           Aramanıza uyan bir küme yok. Farklı bir kelime deneyin.
         </p>
       )}
-      {words.length > 0 && (
-        <RelaxedSearchLinks words={words} targetId={HOME_FEED_ID} />
-      )}
+      {words.length > 0 &&
+        (sort === SEARCH_SORT_NEW ? (
+          <RelaxedSearchLinks words={words} targetId={HOME_FEED_ID} sort="yeni" />
+        ) : (
+          <RelaxedSearchLinks words={words} targetId={HOME_FEED_ID} />
+        ))}
       <ClearSearchLink targetId={HOME_FEED_ID} />
     </div>
   );
@@ -919,9 +985,11 @@ interface PaginationProps {
   currentPage: number;
   totalPages: number;
   query?: string;
+  /** The order the search was asked for (h191): the links keep ?sirala=yeni. */
+  sort?: SearchSort | null;
 }
 
-function Pagination({ currentPage, totalPages, query }: PaginationProps) {
+function Pagination({ currentPage, totalPages, query, sort = null }: PaginationProps) {
   if (totalPages <= 1) return null;
 
   // We rebuild the query string from scratch (instead of mutating the
@@ -930,6 +998,7 @@ function Pagination({ currentPage, totalPages, query }: PaginationProps) {
   const mkHref = (p: number) => {
     const params = new URLSearchParams();
     if (query) params.set("q", query);
+    if (query && sort === SEARCH_SORT_NEW) params.set("sirala", SEARCH_SORT_NEW);
     if (p > 1) params.set("page", String(p));
     const qs = params.toString();
     return qs ? `/?${qs}` : "/";
@@ -967,18 +1036,11 @@ function Pagination({ currentPage, totalPages, query }: PaginationProps) {
 // Archive pager (h170-roadmap-1)
 // ---------------------------------------------------------------------------
 
-// The address of one page of the archive ranking: the query and, after the first page, `arsiv`. Built
-// with URLSearchParams from scratch (so page 1 is the plain "/?q=" the search box makes, the query is
-// encoded, and `?page=` never rides along: an archive page is not an in-feed page).
-function archiveHref(q: string, archivePage: number): string {
-  const params = new URLSearchParams();
-  params.set("q", q);
-  if (archivePage > 1) params.set("arsiv", String(archivePage));
-  return `/?${params.toString()}`;
-}
-
 // The pager under the archive list: "← Önceki sonuçlar", the page as "N. sayfa" (aria-current), and
-// "Sonraki sonuçlar →". A pure server component: plain links, no client JS. prefetch is off because
+// "Sonraki sonuçlar →". The address of a page is searchHref (src/lib/search/search-sort.ts): the query, `sirala=yeni`
+// when the newest-first order was asked for (h191), and, after the first page, `arsiv`; built with URLSearchParams from
+// scratch (so page 1 is the plain "/?q=" the search box makes, the query is encoded, and `?page=` never rides along: an
+// archive page is not an in-feed page). A pure server component: plain links, no client JS. prefetch is off because
 // a followed link costs one archive search (each page is its own RPC, bounded at 4 per query), and a
 // prefetch would spend it for a page the reader may never open. `end`: the last page (the 96 best
 // matches) came back full, so the page says there is no next one and what to do instead.
@@ -987,11 +1049,17 @@ function ArchivePager({
   page,
   hasNext,
   end,
+  sort = null,
+  newestShown = false,
 }: {
   q: string;
   page: number;
   hasNext: boolean;
   end: boolean;
+  /** The order the search was asked for (h191): the links keep ?sirala=yeni. */
+  sort?: SearchSort | null;
+  /** The rows are in the newest-first order, so the closing note says "En yeni", not "En ilgili". */
+  newestShown?: boolean;
 }) {
   return (
     <div className="space-y-2 pt-4">
@@ -1001,7 +1069,7 @@ function ArchivePager({
       >
         {page > 1 ? (
           <Link
-            href={archiveHref(q, page - 1)}
+            href={searchHref(q, { sort, archivePage: page - 1 })}
             prefetch={false}
             className={PAGER_LINK_CLASS}
           >
@@ -1013,7 +1081,7 @@ function ArchivePager({
         </span>
         {hasNext ? (
           <Link
-            href={archiveHref(q, page + 1)}
+            href={searchHref(q, { sort, archivePage: page + 1 })}
             prefetch={false}
             className={PAGER_LINK_CLASS}
           >
@@ -1023,7 +1091,7 @@ function ArchivePager({
       </nav>
       {end ? (
         <p className="text-center text-xs text-muted-foreground">
-          {`En ilgili ${ARCHIVE_MAX_PAGE * ARCHIVE_PAGE_SIZE} sonuç gösterildi; daha fazlası için aramayı daraltın.`}
+          {`${newestShown ? "En yeni" : "En ilgili"} ${ARCHIVE_MAX_PAGE * ARCHIVE_PAGE_SIZE} sonuç gösterildi; daha fazlası için aramayı daraltın.`}
         </p>
       ) : null}
     </div>
@@ -1032,12 +1100,12 @@ function ArchivePager({
 
 // A later page whose function is not in the schema cache yet (migration 211 is applied before the
 // deploy; until then only pages 2-4 degrade, to this). It says so and leads to page 1.
-function ArchivePageUnavailable({ q }: { q: string }) {
+function ArchivePageUnavailable({ q, sort = null }: { q: string; sort?: SearchSort | null }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-10 text-center">
       <p className="text-xs text-muted-foreground">Bu sayfa şu an gösterilemiyor.</p>
       <Link
-        href={archiveHref(q, 1)}
+        href={searchHref(q, { sort })}
         prefetch={false}
         className={PAGER_LINK_CLASS}
       >

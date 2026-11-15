@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Fragment, Suspense, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -90,10 +91,12 @@ import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-chan
 import { FollowButton } from "@/components/follow/follow-button";
 import { HomeLcpPreload } from "@/components/home/home-lcp-preload";
 import { RelaxedSearchLinks } from "@/components/home/relaxed-search-links";
+import { SearchSortToggle } from "@/components/home/search-sort-toggle";
 import { RisingRail } from "@/components/home/rising-rail";
 import { homeFirstCard } from "@/lib/home/first-card";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 import { resultCountPhrase } from "@/lib/search/search-status";
+import { searchHref } from "@/lib/search/search-sort";
 
 type Elementish = { type?: unknown; props?: Record<string, unknown> };
 
@@ -2483,5 +2486,463 @@ describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
       expect(collectElements(tree).some((el) => el.type === RisingRail)).toBe(false);
       expect(collectElements(tree).some(isRail)).toBe(false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h191: ?sirala=yeni, the newest-first order of the archive search (migration 215's search_cluster_ids_new). Only the exact
+// value 'yeni' selects it; every archive page then reads the new function, the toggle "Sırala: En alakalı · En yeni" sits above
+// the results of every search, and the ranked order (no sirala, or any other value) keeps its calls, its cards and its pager.
+// ---------------------------------------------------------------------------
+
+describe("HomeFeed — the newest-first order (?sirala=yeni, h191)", () => {
+  type Sp = { q?: string | string[]; page?: string | string[]; arsiv?: string | string[]; sirala?: string | string[] };
+  const inFeed = [bundle("f1", "Enflasyon rakamları açıklandı"), bundle("f2", "Enflasyon beklentisi düştü")];
+  const archiveRows = (n: number, prefix = "x") =>
+    Array.from({ length: n }, (_, i) => bundle(`${prefix}${i + 1}`, `Arşiv haberi ${prefix}${i + 1}`));
+  /** What searchClusters(q, page, "yeni") answers: ok, newest, a full page is capped (and typedFull on page 1). */
+  const newest = (n = 24, o: { typedFull?: boolean } = {}) => ({
+    ok: true as const,
+    bundles: archiveRows(n),
+    capped: n >= 24,
+    newest: true as const,
+    ...(n >= 24 && o.typedFull !== false ? { typedFull: true as const } : {}),
+  });
+
+  async function render(sp: Sp, search: unknown, feed = feedOf(...inFeed)) {
+    getPoliticsClusters.mockResolvedValue(feed);
+    searchClusters.mockResolvedValue(search);
+    return (await HomeFeed({ searchParams: Promise.resolve(sp) })) as Elementish;
+  }
+
+  const toggles = (tree: unknown) => collectElements(tree).filter((e) => e.type === SearchSortToggle);
+
+  function pager(tree: unknown): Elementish | null {
+    const el = collectElements(tree).find((e) => typeName(e) === "ArchivePager");
+    return el ? (el.type as (props: unknown) => Elementish)(el.props) : null;
+  }
+  const linksOf = (node: unknown) =>
+    collectElements(node)
+      .filter((el) => typeof el.props?.href === "string")
+      .map((el) => [textOf(el), el.props?.href]);
+
+  describe("which requests read the new function", () => {
+    it("sirala=yeni: page 1 asks searchClusters(q, 1, 'yeni') and a later page asks searchClusters(q, N, 'yeni')", async () => {
+      await render({ q: "enflasyon", sirala: "yeni" }, newest());
+      expect(searchClusters).toHaveBeenCalledTimes(1);
+      expect(searchClusters).toHaveBeenLastCalledWith("enflasyon", 1, "yeni");
+      await render({ q: "enflasyon", sirala: "yeni", arsiv: "3" }, newest());
+      expect(searchClusters).toHaveBeenLastCalledWith("enflasyon", 3, "yeni");
+      await render({ q: "enflasyon", sirala: "yeni", arsiv: "9" }, newest());
+      expect(searchClusters).toHaveBeenLastCalledWith("enflasyon", 4, "yeni");
+    });
+
+    it("every other value is the ranked order, called exactly as before, and the raw value goes nowhere", async () => {
+      const others: Array<string | string[]> = ["", "relevance", "alakali", "YENI", "Yeni", "yeni ", ["yeni"], ["yeni", "yeni"], ["x", "yeni"]];
+      for (const sirala of others) {
+        searchClusters.mockClear();
+        await render({ q: "enflasyon", sirala }, { ok: true, bundles: [] });
+        expect(searchClusters.mock.calls, JSON.stringify(sirala)).toEqual([["enflasyon"]]);
+        searchClusters.mockClear();
+        await render({ q: "enflasyon", sirala, arsiv: "2" }, { ok: true, bundles: [] });
+        expect(searchClusters.mock.calls, JSON.stringify(sirala)).toEqual([["enflasyon", 2]]);
+      }
+      searchClusters.mockClear();
+      await render({ q: "enflasyon" }, { ok: true, bundles: [] });
+      expect(searchClusters.mock.calls).toEqual([["enflasyon"]]);
+    });
+
+    it("sirala without a searchable query is ignored: no search, no toggle", async () => {
+      for (const q of [undefined, "", "   ", "a", "!!"]) {
+        searchClusters.mockClear();
+        const tree = await render({ ...(q === undefined ? {} : { q }), sirala: "yeni" }, { ok: true, bundles: [] });
+        expect(searchClusters, String(q)).not.toHaveBeenCalled();
+        expect(toggles(tree), String(q)).toHaveLength(0);
+      }
+    });
+
+    it("a repeated ?q= reads its first value, with the order", async () => {
+      await render({ q: ["enflasyon", "deprem"], sirala: "yeni" }, newest());
+      expect(searchClusters).toHaveBeenLastCalledWith("enflasyon", 1, "yeni");
+    });
+  });
+
+  describe("the toggle", () => {
+    it("is above the results of a search: after the count line, before the first card, with the query and the order shown", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, newest());
+      const found = toggles(tree);
+      expect(found).toHaveLength(1);
+      expect(found[0]?.props).toEqual({ q: "enflasyon", active: "yeni" });
+      const all = collectElements(tree);
+      const at = all.indexOf(found[0]!);
+      const firstCard = all.findIndex((e) => e.props?.cluster !== undefined);
+      const follow = all.findIndex((e) => e.type === FollowButton);
+      expect(follow).toBeGreaterThanOrEqual(0);
+      expect(at).toBeGreaterThan(follow);
+      expect(at).toBeLessThan(firstCard);
+    });
+
+    it("the ranked order shows it too, with no order active (the ranked link is the current one)", async () => {
+      const tree = await render({ q: "enflasyon" }, { ok: true, bundles: archiveRows(5), capped: false });
+      expect(toggles(tree)).toHaveLength(1);
+      expect(toggles(tree)[0]?.props).toEqual({ q: "enflasyon", active: null });
+    });
+
+    it("is shown once on every archive page of both orders (a later page keeps it)", async () => {
+      for (const sp of [{ q: "enflasyon", arsiv: "2" }, { q: "enflasyon", sirala: "yeni", arsiv: "2" }, { q: "enflasyon", sirala: "yeni", arsiv: "4" }]) {
+        const tree = await render(sp, { ...newest(), newest: sp.sirala === "yeni" ? true : undefined });
+        expect(toggles(tree), JSON.stringify(sp)).toHaveLength(1);
+      }
+    });
+
+    it("the order SHOWN is what is active: a newest-first request that was answered with the ranked order (215 not applied) shows En alakalı as current", async () => {
+      const fellBack = { ok: true as const, bundles: archiveRows(5), capped: false };
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, fellBack);
+      expect(toggles(tree)[0]?.props).toEqual({ q: "enflasyon", active: null });
+      // and the wording is the ranked one
+      expect(liveRegionText(tree)).toBe("“enflasyon” için 7 sonuç bulundu.");
+    });
+
+    it("is absent when nothing was searched or the search failed: no query, a too-short query, an unavailable archive", async () => {
+      expect(toggles(await render({}, undefined, feedOf(...manyBundles(3))))).toHaveLength(0);
+      expect(toggles(await render({ q: "a" }, { ok: true, bundles: [] }))).toHaveLength(0);
+      expect(toggles(await render({ q: "enflasyon" }, { ok: false }))).toHaveLength(0);
+      expect(toggles(await render({ q: "enflasyon", sirala: "yeni" }, { ok: false }))).toHaveLength(0);
+    });
+
+    it("is absent on a ranked search that found nothing (there is nothing to order), present on a newest-first one (to go back)", async () => {
+      const none = { ok: true as const, bundles: [], capped: false };
+      expect(toggles(await render({ q: "zzqxkv" }, none, feedOf(bundle("ak", "AK Parti"))))).toHaveLength(0);
+      const tree = await render({ q: "zzqxkv", sirala: "yeni" }, { ...none, newest: true }, feedOf(bundle("ak", "AK Parti")));
+      expect(toggles(tree)).toHaveLength(1);
+      expect(toggles(tree)[0]?.props).toEqual({ q: "zzqxkv", active: "yeni" });
+    });
+
+    it("is present when only the feed matches (the archive has nothing more)", async () => {
+      const tree = await render({ q: "ak parti" }, { ok: true, bundles: [], capped: false }, feedOf(bundle("ak", "AK Parti kongre")));
+      expect(toggles(tree)).toHaveLength(1);
+    });
+  });
+
+  describe("the wording follows the order shown", () => {
+    it("page 1: the live region and the archive heading say 'en yeni', never 'en ilgili'", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, newest());
+      // the in-feed matches (f1, f2) are not counted: the newest order is the archive list alone (review ui-1)
+      expect(liveRegionText(tree)).toBe("“enflasyon” için en yeni 24 sonuç gösteriliyor.");
+      expect(visibleText(tree)).toContain("en yeni 24 sonuç");
+      expect(visibleText(tree)).not.toContain("en ilgili");
+      const headings = collectElements(tree).filter((e) => e.type === "h2").map((e) => textOf(e));
+      expect(headings).toContain("Arşivden: en yeni 24 sonuç");
+      expect(headings.join(" ")).not.toContain("en ilgili");
+    });
+
+    it("a later page names its page in the new wording", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni", arsiv: "2" }, newest());
+      expect(liveRegionText(tree)).toBe("“enflasyon” için en yeni sonuçların 2. sayfası gösteriliyor.");
+      const headings = collectElements(tree).filter((e) => e.type === "h2").map((e) => textOf(e));
+      expect(headings).toContain("Arşivden: en yeni sonuçlar (2. sayfa)");
+    });
+
+    it("the ranked order's wording is what it was", async () => {
+      const tree = await render({ q: "enflasyon" }, { ok: true, bundles: archiveRows(24), capped: true, typedFull: true });
+      expect(liveRegionText(tree)).toBe("“enflasyon” için en ilgili 26 sonuç gösteriliyor.");
+      const headings = collectElements(tree).filter((e) => e.type === "h2").map((e) => textOf(e));
+      expect(headings).toContain("Arşivden: en ilgili 24 sonuç");
+    });
+  });
+
+  describe("the archive pager keeps sirala=yeni", () => {
+    it("page 1, full: 'Sonraki sonuçlar →' to sirala=yeni&arsiv=2, no previous link", async () => {
+      const nav = pager(await render({ q: "enflasyon", sirala: "yeni" }, newest()));
+      expect(nav).not.toBeNull();
+      expect(linksOf(nav)).toEqual([["Sonraki sonuçlar →", "/?q=enflasyon&sirala=yeni&arsiv=2"]]);
+    });
+
+    it("page 2: back to page 1 (sirala kept, no arsiv) and on to page 3", async () => {
+      const nav = pager(await render({ q: "enflasyon", sirala: "yeni", arsiv: "2" }, newest()));
+      expect(linksOf(nav)).toEqual([
+        ["← Önceki sonuçlar", "/?q=enflasyon&sirala=yeni"],
+        ["Sonraki sonuçlar →", "/?q=enflasyon&sirala=yeni&arsiv=3"],
+      ]);
+    });
+
+    it("the next link appears only for a full page (24 rows) and a page before the 4th", async () => {
+      // 23 rows: no next link, previous only
+      expect(linksOf(pager(await render({ q: "enflasyon", sirala: "yeni", arsiv: "2" }, newest(23))))).toEqual([
+        ["← Önceki sonuçlar", "/?q=enflasyon&sirala=yeni"],
+      ]);
+      // page 1 with 23 rows: no pager at all
+      expect(pager(await render({ q: "enflasyon", sirala: "yeni" }, newest(23)))).toBeNull();
+      // page 4, full: previous only, and the 'only the best 96' note in the new wording
+      const last = await render({ q: "enflasyon", sirala: "yeni", arsiv: "4" }, newest());
+      expect(linksOf(pager(last))).toEqual([["← Önceki sonuçlar", "/?q=enflasyon&sirala=yeni&arsiv=3"]]);
+      expect(textOf(pager(last))).toContain("En yeni 96 sonuç gösterildi; daha fazlası için aramayı daraltın.");
+      expect(textOf(pager(last))).not.toContain("En ilgili");
+    });
+
+    it("page 1 of the new order shows the next link from a full page, and lists rows that are also in the feed (none is dropped)", async () => {
+      const search = { ...newest(), bundles: inFeed };
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, search);
+      expect(pager(tree)).not.toBeNull();
+      expect(clusterCardIds(tree)).toEqual(["f1", "f2"]);
+    });
+
+    it("keeps sirala when the answer fell back to the ranked order (the reader asked for the new one)", async () => {
+      const fellBack = { ok: true as const, bundles: archiveRows(24), capped: true, typedFull: true as const };
+      const nav = pager(await render({ q: "enflasyon", sirala: "yeni" }, fellBack));
+      expect(linksOf(nav)).toEqual([["Sonraki sonuçlar →", "/?q=enflasyon&sirala=yeni&arsiv=2"]]);
+    });
+
+    it("the ranked pager is exactly what it was: no sirala in any link", async () => {
+      const full = { ok: true as const, bundles: archiveRows(24), capped: true, typedFull: true as const };
+      expect(linksOf(pager(await render({ q: "enflasyon" }, full)))).toEqual([["Sonraki sonuçlar →", "/?q=enflasyon&arsiv=2"]]);
+      expect(linksOf(pager(await render({ q: "enflasyon", arsiv: "2" }, full)))).toEqual([
+        ["← Önceki sonuçlar", "/?q=enflasyon"],
+        ["Sonraki sonuçlar →", "/?q=enflasyon&arsiv=3"],
+      ]);
+      expect(linksOf(pager(await render({ q: "enflasyon", sirala: "alakali" }, full)))).toEqual([["Sonraki sonuçlar →", "/?q=enflasyon&arsiv=2"]]);
+    });
+
+    it("the hrefs are built with URLSearchParams: a query cannot add sirala or arsiv", async () => {
+      const q = "a&sirala=yeni&arsiv=4";
+      const links = linksOf(pager(await render({ q, arsiv: "3" }, { ok: true, bundles: archiveRows(24), capped: true })));
+      for (const [, href] of links) {
+        const p = new URLSearchParams(String(href).slice(2));
+        expect(p.get("q")).toBe(q);
+        expect(p.has("sirala")).toBe(false);
+      }
+    });
+
+    it("the page that cannot be shown links back to page 1 in the order asked for", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni", arsiv: "2" }, { ok: false, unavailablePage: true });
+      const el = collectElements(tree).find((e) => typeName(e) === "ArchivePageUnavailable");
+      expect(el).toBeDefined();
+      const out = (el!.type as (props: unknown) => Elementish)(el!.props);
+      expect(linksOf(out)).toEqual([["İlk sayfaya dön", "/?q=enflasyon&sirala=yeni"]]);
+    });
+  });
+
+  describe("the in-feed pager keeps sirala=yeni too (a newest request answered in the ranked order)", () => {
+    const many = () => feedOf(...manyBundles(31).map((b, i) => bundle(b.cluster.id, `Enflasyon haberi ${i}`)));
+    // A newest-first request that was answered in the ranked order (215 not applied, or the call failed) carries no `newest`: the
+    // in-feed sections and their pager are shown, and the pager keeps the order that was asked for. A newest answer has none (review ui-1).
+    const degraded = { ok: true as const, bundles: archiveRows(5), capped: false };
+
+    it("sirala=yeni: Önceki and Sonraki carry it", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, degraded, many());
+      const el = collectElements(tree).find((e) => typeName(e) === "Pagination")!;
+      const out = (el.type as (props: unknown) => Elementish)(el.props);
+      expect(linksOf(out)).toEqual([["Sonraki", "/?q=enflasyon&sirala=yeni&page=2"]]);
+      const page2 = await render({ q: "enflasyon", sirala: "yeni", page: "2" }, degraded, many());
+      const el2 = collectElements(page2).find((e) => typeName(e) === "Pagination")!;
+      const out2 = (el2.type as (props: unknown) => Elementish)(el2.props);
+      expect(linksOf(out2)[0]).toEqual(["Önceki", "/?q=enflasyon&sirala=yeni"]);
+    });
+
+    it("the ranked order's links are exactly what they were", async () => {
+      const tree = await render({ q: "enflasyon" }, { ok: true, bundles: [], capped: false }, many());
+      const el = collectElements(tree).find((e) => typeName(e) === "Pagination")!;
+      const out = (el.type as (props: unknown) => Elementish)(el.props);
+      expect(linksOf(out)).toEqual([["Sonraki", "/?q=enflasyon&page=2"]]);
+    });
+  });
+
+  describe("no results in the new order", () => {
+    const QUESTION = "emekli bayram ikramiyesi ne zaman";
+
+    const NONE = { ok: true as const, bundles: [], capped: false };
+    const rankedLinks = (tree: unknown) =>
+      collectRendered(tree, new Set(["EmptySearch"])).filter((e) => e.props?.href === searchHref(QUESTION) && textOf(e) === "En alakalı sıralamada ara");
+
+    it("the newest order's zero is not a ranked zero: its own heading and line, a link to the ranked search, the word chips keep sirala=yeni (review ui-2)", async () => {
+      const tree = await render({ q: QUESTION, sirala: "yeni" }, { ...NONE, newest: true }, feedOf(bundle("ak", "AK Parti")));
+      const text = visibleText(tree);
+      expect(text).toContain("En yeni sıralamada haber bulunamadı");
+      expect(text).not.toContain("Hiç haber bulunamadı");
+      expect(text).toContain("için başlığında bu ifade geçen haber yok.");
+      expect(text).not.toContain("için sonuç yok.");
+      const links = rankedLinks(tree);
+      expect(links).toHaveLength(1);
+      expect(links[0]?.type).toBe(Link);
+      expect(links[0]?.props?.prefetch).toBe(false);
+      expect(String(links[0]?.props?.className)).toContain("min-h-[44px]");
+      // the live region says the same: it is a zero in the newest order, and the ranked one is a tap away
+      expect(liveRegionText(tree)).toBe(`“${QUESTION}” için en yeni sıralamada sonuç bulunamadı. En alakalı sıralamayı deneyin.`);
+      const chips = relaxedSearchLinks(tree);
+      expect(chips).toHaveLength(1);
+      expect(chips[0]?.props?.words).toEqual(["emekli", "bayram", "ikramiyesi", "zaman"]);
+      expect(chips[0]?.props?.sort).toBe("yeni");
+      expect(clearSearchLinks(tree)).toHaveLength(1);
+    });
+
+    it("a newest answer with nothing in it shows the card even when the feed has matching stories (the feed is not part of the newest list)", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, { ...NONE, newest: true });
+      expect(visibleText(tree)).toContain("En yeni sıralamada haber bulunamadı");
+      expect(clusterCardIds(tree)).toEqual([]);
+      expect(collectRendered(tree, new Set(["EmptySearch"])).filter((e) => e.props?.href === searchHref("enflasyon"))).toHaveLength(1);
+    });
+
+    it("a request answered in the ranked order that finds nothing IS a ranked zero: the ranked wording, no link back, the chips still keep sirala=yeni", async () => {
+      const tree = await render({ q: QUESTION, sirala: "yeni" }, NONE, feedOf(bundle("ak", "AK Parti")));
+      expect(visibleText(tree)).toContain("Hiç haber bulunamadı");
+      expect(visibleText(tree)).toContain("için sonuç yok. Farklı bir kelime deneyin.");
+      expect(visibleText(tree)).not.toContain("En yeni sıralamada");
+      expect(rankedLinks(tree)).toHaveLength(0);
+      expect(liveRegionText(tree)).toBe(`“${QUESTION}” için sonuç bulunamadı.`);
+      expect(relaxedSearchLinks(tree)[0]?.props?.sort).toBe("yeni");
+    });
+
+    it("the ranked search with nothing keeps its card and links nowhere extra", async () => {
+      const tree = await render({ q: QUESTION }, NONE, feedOf(bundle("ak", "AK Parti")));
+      expect(visibleText(tree)).toContain("Hiç haber bulunamadı");
+      expect(rankedLinks(tree)).toHaveLength(0);
+    });
+
+    it("the ranked order's chips carry no sort prop at all", async () => {
+      const tree = await render({ q: QUESTION }, { ok: true, bundles: [] }, feedOf(bundle("ak", "AK Parti")));
+      const chips = relaxedSearchLinks(tree);
+      expect(chips).toHaveLength(1);
+      expect(chips[0]?.props).toEqual({ words: ["emekli", "bayram", "ikramiyesi", "zaman"], targetId: "haber-akisi" });
+    });
+  });
+
+  describe("the newest order is the archive list alone (review ui-1)", () => {
+    // The feed holds a strip story (brk1) and 31 ranked stories (m1..m31) whose titles hold the query. Three of the 24 RPC rows are stories of the
+    // feed (m3, brk1, m1): in the newest order they stay where the RPC put them, the feed's own sections and pager are not shown.
+    const strip = bundle("brk1", "Enflasyon son dakika gelişmesi");
+    const feedWith = (n: number) =>
+      ({ bundles: Array.from({ length: n }, (_, i) => bundle(`m${i + 1}`, `Enflasyon haberi ${i + 1}`)), breakingBundles: [strip] }) as unknown as PoliticsClustersResult;
+    const rpcIds = ["m3", "x1", "brk1", "x2", "m1", ...Array.from({ length: 19 }, (_, i) => `y${i + 1}`)];
+    const rpc = {
+      ok: true as const,
+      bundles: rpcIds.map((id) => bundle(id, `Enflasyon ${id}`)),
+      capped: true,
+      typedFull: true as const,
+      newest: true as const,
+    };
+    const h2s = (tree: unknown) => collectElements(tree).filter((e) => e.type === "h2").map((e) => textOf(e));
+    const named = (tree: unknown, name: string) => collectElements(tree).filter((e) => typeName(e) === name);
+
+    it("page 1 lists all 24 RPC rows in the RPC order under one archive heading: no Son Dakika, no day bucket, no in-feed pager", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, rpc, feedWith(31));
+      expect(rpcIds).toHaveLength(24);
+      expect(clusterCardIds(tree)).toEqual(rpcIds);
+      expect(h2s(tree)).toEqual(["Arşivden: en yeni 24 sonuç"]);
+      expect(named(tree, "Pagination")).toHaveLength(0);
+      // the archive pager is the only pager, and it keeps the order
+      expect(linksOf(pager(tree))).toEqual([["Sonraki sonuçlar →", "/?q=enflasyon&sirala=yeni&arsiv=2"]]);
+    });
+
+    it("the count line and the live region count the archive rows only, not the feed's stories", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, rpc, feedWith(31));
+      expect(liveRegionText(tree)).toBe("“enflasyon” için en yeni 24 sonuç gösteriliyor.");
+      expect(visibleText(tree)).toContain("için en yeni 24 sonuç");
+      expect(visibleText(tree)).not.toContain("en yeni 53 sonuç");
+    });
+
+    it("nothing of the feed is handed on: the last-visit stamp has no items, and there is no rail and no teaser on a search", async () => {
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, rpc, feedWith(31));
+      const nsv = named(tree, "NewSinceLastVisit");
+      expect(nsv).toHaveLength(1);
+      expect(nsv[0]?.props).toMatchObject({ items: [], listed: [], stamp: false });
+      expect(collectElements(tree).some((e) => e.type === RisingRail)).toBe(false);
+      expect(named(tree, "DailyGameTeaser")).toHaveLength(0);
+    });
+
+    it("?page=2&sirala=yeni is page 1 of it: the in-feed page does not move the list", async () => {
+      const p1 = await render({ q: "enflasyon", sirala: "yeni" }, rpc, feedWith(31));
+      const p2 = await render({ q: "enflasyon", sirala: "yeni", page: "2" }, rpc, feedWith(31));
+      expect(clusterCardIds(p2)).toEqual(rpcIds);
+      expect(clusterCardIds(p2)).toEqual(clusterCardIds(p1));
+      expect(liveRegionText(p2)).toBe(liveRegionText(p1));
+      expect(visibleText(p2)).toBe(visibleText(p1));
+      expect(named(p2, "Pagination")).toHaveLength(0);
+      expect(searchClusters).toHaveBeenLastCalledWith("enflasyon", 1, "yeni");
+    });
+
+    it("a later page lists its RPC rows too, the ids that are also in the feed included, in the RPC order", async () => {
+      for (const arsiv of ["2", "3"]) {
+        const tree = await render({ q: "enflasyon", sirala: "yeni", arsiv }, rpc, feedWith(31));
+        expect(searchClusters).toHaveBeenLastCalledWith("enflasyon", Number(arsiv), "yeni");
+        expect(clusterCardIds(tree), arsiv).toEqual(rpcIds);
+        expect(named(tree, "Pagination"), arsiv).toHaveLength(0);
+      }
+    });
+
+    it("a newest request answered in the ranked order (no newest flag) still shows the in-feed sections and the ranked wording", async () => {
+      const fellBack = { ok: true as const, bundles: archiveRows(5), capped: false };
+      const tree = await render({ q: "enflasyon", sirala: "yeni" }, fellBack, feedWith(31));
+      const ids = clusterCardIds(tree);
+      expect(ids).toContain("brk1");
+      expect(ids).toContain("m1");
+      expect(ids).toContain("x1");
+      expect(h2s(tree)).toContain("Son Dakika");
+      expect(named(tree, "Pagination")).toHaveLength(1);
+      // 1 strip story + 31 ranked stories + 5 archive rows, worded as the ranked order
+      expect(liveRegionText(tree)).toBe("“enflasyon” için 37 sonuç bulundu.");
+      expect(visibleText(tree)).not.toContain("en yeni");
+    });
+
+    it("the ranked order is untouched: the same feed and rows show the strip, the buckets and the pager", async () => {
+      const ranked = { ok: true as const, bundles: archiveRows(5), capped: false };
+      const tree = await render({ q: "enflasyon" }, ranked, feedWith(31));
+      expect(h2s(tree)).toContain("Son Dakika");
+      expect(named(tree, "Pagination")).toHaveLength(1);
+      expect(liveRegionText(tree)).toBe("“enflasyon” için 37 sonuç bulundu.");
+    });
+  });
+
+  describe("ranked mode is unchanged by the toggle", () => {
+    it("the cards, the wording, the live region and the pager are the same with and without a junk sirala", async () => {
+      const search = { ok: true as const, bundles: archiveRows(24), capped: true, typedFull: true as const };
+      const plain = await render({ q: "enflasyon" }, search);
+      const junk = await render({ q: "enflasyon", sirala: "alakali" }, search);
+      expect(clusterCardIds(junk)).toEqual(clusterCardIds(plain));
+      expect(visibleText(junk)).toBe(visibleText(plain));
+      expect(liveRegionText(junk)).toBe(liveRegionText(plain));
+      expect(linksOf(pager(junk))).toEqual(linksOf(pager(plain)));
+      expect(toggles(junk)[0]?.props).toEqual(toggles(plain)[0]?.props);
+    });
+
+    it("the plain home page has no toggle and calls no search", async () => {
+      const tree = await render({}, undefined, feedOf(...manyBundles(3)));
+      expect(toggles(tree)).toHaveLength(0);
+      expect(searchClusters).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("generateMetadata — the newest-first order is the same noindex search page (h191)", () => {
+  const meta = (sp: { q?: string | string[]; page?: string | string[]; arsiv?: string | string[]; sirala?: string | string[] }) =>
+    generateMetadata({ searchParams: Promise.resolve(sp) });
+  const noindex = { index: false, follow: true };
+
+  it("sirala=yeni gives exactly the metadata of the ranked search: the same title, noindex,follow, no canonical", async () => {
+    const ranked = await meta({ q: "enflasyon" });
+    const newest = await meta({ q: "enflasyon", sirala: "yeni" });
+    expect(newest).toEqual(ranked);
+    expect(newest).toEqual({ title: { absolute: "“enflasyon” araması — Tayf" }, robots: noindex });
+    expect(newest).not.toHaveProperty("alternates");
+    expect(newest.robots).toEqual(noindex);
+  });
+
+  it("later pages too: the same title and robots as the ranked page", async () => {
+    for (const arsiv of ["2", "4", "9"]) {
+      expect(await meta({ q: "enflasyon", sirala: "yeni", arsiv })).toEqual(await meta({ q: "enflasyon", arsiv }));
+    }
+    expect(await meta({ q: "enflasyon", sirala: "yeni", arsiv: "2" })).toEqual({
+      title: { absolute: "“enflasyon” araması — 2. sayfa — Tayf" },
+      robots: noindex,
+    });
+  });
+
+  it("every value of sirala gives the same metadata, and sirala without a query changes nothing", async () => {
+    const today = await meta({ q: "enflasyon" });
+    for (const sirala of ["yeni", "", "x", ["yeni"], ["yeni", "x"]]) {
+      expect(await meta({ q: "enflasyon", sirala }), JSON.stringify(sirala)).toEqual(today);
+    }
+    expect(await meta({ sirala: "yeni" })).toEqual({});
+    expect(await meta({ q: "", sirala: "yeni" })).toEqual({});
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
   });
 });

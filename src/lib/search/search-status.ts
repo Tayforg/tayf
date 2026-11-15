@@ -1,5 +1,6 @@
 import { normaliseSearchQuery } from "@/lib/clusters/turkish-query";
 import { formatCountTr } from "@/lib/format/number-tr";
+import { SEARCH_SORT_NEW, type SearchSort } from "@/lib/search/search-sort";
 
 // Reader-facing sentences for the home search (h10-a11y-2): the text of the
 // always-mounted sr-only live region on "/" and the <title> of "/?q=".
@@ -54,9 +55,17 @@ export function displayQuery(q: string | undefined): string {
  * may exist, because a bare "24 sonuç" would read as the total. The count has
  * Turkish dot grouping ("1.234") and a non-finite count reads as 0.
  */
-export function resultCountPhrase(count: number, capped: boolean): string {
+export function resultCountPhrase(count: number, capped: boolean, sort?: SearchSort | null): string {
   const text = `${formatCountTr(count)} sonuç`;
-  return capped ? `en ilgili ${text}` : text;
+  return capped ? `${rankWord(sort)} ${text}` : text;
+}
+
+/**
+ * h191: "en ilgili" (most relevant) is the word of the ranked order; the newest-first order (?sirala=yeni) says "en yeni".
+ * The one place the two words are chosen, so the visible line, the live region and the page headings cannot disagree.
+ */
+export function rankWord(sort?: SearchSort | null): string {
+  return sort === SEARCH_SORT_NEW ? "en yeni" : "en ilgili";
 }
 
 /**
@@ -64,8 +73,8 @@ export function resultCountPhrase(count: number, capped: boolean): string {
  * sonuçların 2. sayfası". It stands where `resultCountPhrase` stands, in the visible line and in the
  * live region, because the count of one page is not the count of the search.
  */
-export function archivePagePhrase(archivePage: number): string {
-  return `en ilgili sonuçların ${archivePage}. sayfası`;
+export function archivePagePhrase(archivePage: number, sort?: SearchSort | null): string {
+  return `${rankWord(sort)} sonuçların ${archivePage}. sayfası`;
 }
 
 /** An archive page after the first: a whole number from 2 up. Anything else is page 1's wording. */
@@ -88,6 +97,8 @@ export interface SearchStatusArgs {
   archivePage?: number;
   /** `unavailable` because migration 211 is not applied: this page cannot be shown, the search can. */
   pageUnavailable?: boolean;
+  /** The order the results are shown in (h191): "yeni" says "en yeni", absent or null keeps the ranked "en ilgili". */
+  sort?: SearchSort | null;
 }
 
 /**
@@ -104,6 +115,7 @@ export function searchStatusText({
   unavailable,
   archivePage,
   pageUnavailable,
+  sort,
 }: SearchStatusArgs): string {
   const shown = displayQuery(q);
   if (!shown) return "";
@@ -115,7 +127,7 @@ export function searchStatusText({
     if (unavailable) {
       return pageUnavailable === true ? "Bu sayfa şu an gösterilemiyor." : "Arama şu an yanıt vermiyor.";
     }
-    return `“${shown}” için ${archivePagePhrase(archivePage)} gösteriliyor.`;
+    return `“${shown}” için ${archivePagePhrase(archivePage, sort)} gösteriliyor.`;
   }
 
   const results = Number.isFinite(count) && count > 0 ? count : 0;
@@ -124,9 +136,15 @@ export function searchStatusText({
       ? "Arama şu an yanıt vermiyor."
       : `“${shown}” için ${resultCountPhrase(results, false)} bulundu; arşiv araması şu an yanıt vermiyor.`;
   }
-  if (results === 0) return `“${shown}” için sonuç bulunamadı.`;
+  // h191 review ui-2: a zero in the newest order is not a ranked zero (its literal-title filter is stricter than the ranked
+  // order, so the ranked order can hold results), and the reader who hears "no results" has no reason to open the sort toggle.
+  if (results === 0) {
+    return sort === SEARCH_SORT_NEW
+      ? `“${shown}” için en yeni sıralamada sonuç bulunamadı. En alakalı sıralamayı deneyin.`
+      : `“${shown}” için sonuç bulunamadı.`;
+  }
   if (capped) {
-    return `“${shown}” için ${resultCountPhrase(results, true)} gösteriliyor.`;
+    return `“${shown}” için ${resultCountPhrase(results, true, sort)} gösteriliyor.`;
   }
   return `“${shown}” için ${resultCountPhrase(results, false)} bulundu.`;
 }

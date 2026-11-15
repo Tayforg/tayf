@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useRef } from "react";
 
+import { SEARCH_SORT_NEW, type SearchSort } from "@/lib/search/search-sort";
+
 import { focusTarget } from "./clear-search-link";
 
 // "Kelimeleri tek tek deneyin": one chip per word of a multi-word search that
@@ -13,7 +15,9 @@ import { focusTarget } from "./clear-search-link";
 // the words from the canonical query, the page passes them in.
 //
 // Each chip is a plain search link (?q=word), the word encoded by URLSearchParams
-// and rendered as a React child, so a word cannot add a parameter or markup.
+// and rendered as a React child, so a word cannot add a parameter or markup. In the
+// newest-first order (`sort` "yeni", h191) the chip keeps it: ?q=word&sirala=yeni; any
+// other value, or none, is the plain chip it always was.
 // prefetch={false}: every target is a DB-backed search, and up to six chips must
 // not fire six RPCs when the card scrolls into view (the reason SearchIntentRow
 // and the compact /cluster rows opt out too). scroll={false} keeps the reader
@@ -38,12 +42,22 @@ import { focusTarget } from "./clear-search-link";
 const CHIP_CLASS =
   "inline-flex items-center min-h-6 max-sm:min-h-11 rounded-full border border-border/60 bg-muted/50 px-3 text-xs font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
+// The address of one chip: the word, then sirala=yeni in the newest-first order only.
+function chipHref(word: string, sort: SearchSort | null | undefined): string {
+  const params = new URLSearchParams({ q: word });
+  if (sort === SEARCH_SORT_NEW) params.set("sirala", SEARCH_SORT_NEW);
+  return `/?${params.toString()}`;
+}
+
 export function RelaxedSearchLinks({
   words,
   targetId,
+  sort,
 }: {
   words: readonly string[];
   targetId: string;
+  /** The order the search was asked for (h191): "yeni" is kept on every chip; absent is the ranked order. */
+  sort?: SearchSort | null;
 }) {
   const query = useSearchParams().get("q") ?? "";
   const pending = useRef(false);
@@ -77,7 +91,7 @@ export function RelaxedSearchLinks({
         {words.map((word) => (
           <li key={word} className="min-w-0 max-w-full">
             <Link
-              href={`/?${new URLSearchParams({ q: word }).toString()}`}
+              href={chipHref(word, sort)}
               prefetch={false}
               scroll={false}
               className={CHIP_CLASS}
