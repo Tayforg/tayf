@@ -343,6 +343,11 @@ export default async function EntityHubPage({ params, searchParams }: PageProps)
             )}
           </section>
 
+          {/* h192-a11y-1: the group heading of the story list (h1 page, h2
+              section, h3 story, as on home and /blindspots). Screen-reader
+              only. Nothing but the cards sits between this and the tail's
+              last card, so one heading covers the head and the tail. */}
+          <h2 className="sr-only">Haberler</h2>
           <div className={listClass}>
             {feedSplit.head.map((b, i) => renderHubCard(b, i, nowMs, trendChartDrawn))}
           </div>
@@ -385,6 +390,7 @@ function renderHubCard(b: ClusterBundle, i: number, nowMs: number, trendChartDra
       articles={b.articles}
       sources={b.sources}
       index={hubCardBannerIndex(i, trendChartDrawn)}
+      headingLevel={3}
       isAging={hoursAgo > 48}
       isWireRedistribution={b.isWireRedistribution}
       effectiveArticleCount={b.effectiveArticleCount}

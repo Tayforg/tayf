@@ -84,6 +84,84 @@ describe("home feed heading outline (h67-landmarks-1)", () => {
   });
 });
 
+// h192-a11y-1: /konu/<slug> and /gundem/<key> were skipped when the outline above
+// was fixed: every story headline there was an <h2> beside the stats <h2>, with no
+// group heading. Same outline as home and /blindspots now: h1 page, h2 section,
+// h3 story. Each page passes headingLevel={3} to its card and carries one
+// screen-reader-only h2 "Haberler" in front of the first card list.
+describe("/konu/[slug] heading outline (h192-a11y-1)", () => {
+  const page = read("src/app/konu/[slug]/page.tsx");
+
+  it("renders cards through the one <ClusterCard>, which passes headingLevel={3}", () => {
+    expect(count(page, "<ClusterCard")).toBe(1);
+    expect(clusterCardTagAt(page, 0)).toContain("headingLevel={3}");
+  });
+
+  it("holds exactly one screen-reader-only h2 'Haberler', after the stats section and before the first card", () => {
+    expect(count(page, 'Haberler</h2>')).toBe(1);
+    expect(page).toContain('<h2 className="sr-only">Haberler</h2>');
+    const stats = page.indexOf('<h2 id="topic-spectrum-heading"');
+    const label = page.indexOf('<h2 className="sr-only">Haberler</h2>');
+    const list = page.indexOf("<div className={listClass}>");
+    const card = page.indexOf("<ClusterCard");
+    expect(stats).toBeGreaterThan(-1);
+    expect(label).toBeGreaterThan(stats);
+    expect(list).toBeGreaterThan(label);
+    expect(card).toBeGreaterThan(list);
+  });
+
+  it("keeps no other h2 between the group heading and the last card, and no h3/h4 of its own", () => {
+    const label = page.indexOf('<h2 className="sr-only">Haberler</h2>');
+    const card = page.indexOf("<ClusterCard");
+    expect(page.slice(label + 1, card)).not.toMatch(/<h[1-6][\s>]/);
+    expect(page).not.toMatch(/<h[34][\s>]/);
+  });
+
+  it("leaves the stats heading an h2", () => {
+    expect(page).toMatch(/<h2 id="topic-spectrum-heading"/);
+  });
+});
+
+describe("/gundem/[key] heading outline (h192-a11y-1)", () => {
+  const page = read("src/app/gundem/[key]/page.tsx");
+
+  it("renders cards only through renderHubCard, whose <ClusterCard> passes headingLevel={3}", () => {
+    expect(count(page, "<ClusterCard")).toBe(1);
+    const fn = page.indexOf("function renderHubCard(");
+    expect(fn).toBeGreaterThan(-1);
+    expect(clusterCardTagAt(page, fn)).toContain("headingLevel={3}");
+  });
+
+  it("holds exactly one screen-reader-only h2 'Haberler', after the stats section and before the head list", () => {
+    expect(count(page, 'Haberler</h2>')).toBe(1);
+    expect(page).toContain('<h2 className="sr-only">Haberler</h2>');
+    const stats = page.indexOf('<h2 id="entity-spectrum-heading"');
+    const label = page.indexOf('<h2 className="sr-only">Haberler</h2>');
+    const head = page.indexOf("feedSplit.head.map(");
+    expect(stats).toBeGreaterThan(-1);
+    expect(label).toBeGreaterThan(stats);
+    expect(head).toBeGreaterThan(label);
+  });
+
+  it("has no other heading between the group heading and the head list, and the tail adds none", () => {
+    const label = page.indexOf('<h2 className="sr-only">Haberler</h2>');
+    const head = page.indexOf("feedSplit.head.map(");
+    expect(page.slice(label + 1, head)).not.toMatch(/<h[1-6][\s>]/);
+    // The tail (EntityHubTail) renders the remaining cards straight after the head
+    // list, under the same h2: no heading of any level of its own.
+    const tail = page.slice(page.indexOf("export async function EntityHubTail("), page.indexOf("function pageHref("));
+    expect(tail).not.toMatch(/<h[1-6][\s>]/);
+  });
+
+  it("holds no h3 or h4 of its own: the cards are the only level-3 headings", () => {
+    expect(page).not.toMatch(/<h[34][\s>]/);
+  });
+
+  it("leaves the stats heading an h2", () => {
+    expect(page).toMatch(/<h2 id="entity-spectrum-heading"/);
+  });
+});
+
 describe("/blindspots heading outline (h67-landmarks-1)", () => {
   const page = read("src/app/blindspots/page.tsx");
 

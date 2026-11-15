@@ -2250,7 +2250,11 @@ describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
   const isRail = (el: Elementish): boolean =>
     el.type === Suspense && (el.props?.children as Elementish | undefined)?.type === RisingRail;
 
-  const isTeaser = (el: Elementish): boolean => el.type === "aside" && el.props?.["aria-label"] === "Günün Tayf'ı";
+  // h192-a11y-2: a <section aria-label>, not an <aside>: a complementary landmark must not be nested in <main>.
+  const isTeaser = (el: Elementish): boolean => el.type === "section" && el.props?.["aria-label"] === "Günün Tayf'ı";
+
+  /** A story section of the feed (Son Dakika, a day bucket): a <section> that is not the teaser's. */
+  const isStorySection = (el: Elementish): boolean => el.type === "section" && !isTeaser(el);
 
   const heading = (section: Elementish): string =>
     textOf(collectElements(section).find((el) => el.type === "h2"));
@@ -2287,7 +2291,7 @@ describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
       nowOverrideMs = NOW;
       const siblings = await feedFor({}, twoBuckets(true));
 
-      const sections = siblings.filter((el) => el.type === "section");
+      const sections = siblings.filter(isStorySection);
       expect(sections.map(heading)).toEqual(["Son Dakika", "Bugün", "Dün"]);
       expect(railsIn(siblings)).toHaveLength(1);
       const at = siblings.findIndex(isRail);
@@ -2299,7 +2303,7 @@ describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
       nowOverrideMs = NOW;
       const siblings = await feedFor({}, twoBuckets(false));
 
-      const sections = siblings.filter((el) => el.type === "section");
+      const sections = siblings.filter(isStorySection);
       expect(sections.map(heading)).toEqual(["Bugün", "Dün"]);
       expect(railsIn(siblings)).toHaveLength(1);
       const at = siblings.findIndex(isRail);
@@ -2311,10 +2315,23 @@ describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
       nowOverrideMs = NOW;
       for (const withStrip of [true, false]) {
         const siblings = await feedFor({}, twoBuckets(withStrip));
-        const sections = siblings.filter((el) => el.type === "section");
+        const sections = siblings.filter(isStorySection);
         const gap = siblings.slice(siblings.indexOf(sections[0]!) + 1, siblings.indexOf(sections[1]!));
         expect(gap.some(isRail), `rail, strip ${withStrip}`).toBe(true);
         expect(gap.some(isTeaser), `teaser, strip ${withStrip}`).toBe(true);
+      }
+    });
+
+    it("the teaser is a <section aria-label=\"Günün Tayf'ı\"> holding DailyGameTeaser, and no element of the feed is an <aside> (h192-a11y-2)", async () => {
+      nowOverrideMs = NOW;
+      for (const withStrip of [true, false]) {
+        const siblings = await feedFor({}, twoBuckets(withStrip));
+        const teasers = siblings.filter(isTeaser);
+        expect(teasers, `teaser, strip ${withStrip}`).toHaveLength(1);
+        expect(teasers[0]!.type).toBe("section");
+        expect(teasers[0]!.props?.["aria-label"]).toBe("Günün Tayf'ı");
+        expect(collectElements(teasers[0]).map(typeName)).toContain("DailyGameTeaser");
+        expect(collectElements(siblings).filter((el) => el.type === "aside"), `asides, strip ${withStrip}`).toHaveLength(0);
       }
     });
 
@@ -2323,7 +2340,7 @@ describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
       teaserOverride = () => null;
       for (const withStrip of [true, false]) {
         const siblings = await feedFor({}, twoBuckets(withStrip));
-        const sections = siblings.filter((el) => el.type === "section");
+        const sections = siblings.filter(isStorySection);
         expect(siblings.some(isTeaser), `teaser, strip ${withStrip}`).toBe(false);
         expect(railsIn(siblings), `rail, strip ${withStrip}`).toHaveLength(1);
         expect(siblings[siblings.findIndex(isRail) - 1], `position, strip ${withStrip}`).toBe(sections[0]);
@@ -2470,7 +2487,7 @@ describe("HomeFeed — the 'Yükselen konular' rail (h170-roadmap-3)", () => {
       nowOverrideMs = NOW;
       for (const withStrip of [true, false]) {
         const siblings = await feedFor({}, twoBuckets(withStrip));
-        const firstSection = siblings.findIndex((el) => el.type === "section");
+        const firstSection = siblings.findIndex(isStorySection);
         expect(siblings.slice(0, firstSection).map(typeName), `strip ${withStrip}`).toEqual([
           "SearchStatus",
           "NewSinceLastVisit",

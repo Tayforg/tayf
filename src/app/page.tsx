@@ -47,6 +47,7 @@ import { groupByDayBucket } from "@/lib/home/day-buckets";
 import { shouldStampLastVisit } from "@/lib/last-visit";
 import { searchIntentLink, type SearchIntent } from "@/lib/search/search-intent";
 import { loadSearchIntent } from "@/lib/search/search-intent-query";
+import { cardAgeBasis, type CardAgeBasis } from "@/lib/search/card-age";
 import { relaxedSearchWords } from "@/lib/search/relaxed-search";
 import {
   SEARCH_SORT_NEW,
@@ -178,10 +179,14 @@ export async function generateMetadata({
 // Every call site sits inside a section whose label is an <h2> ("Son Dakika",
 // the day buckets, the archive), so the card headline is an <h3>
 // (h67-landmarks-1): h1 page, h2 section, h3 story.
+// `ageBasis` is the age pill's basis (h192-yeni-1): only the archive list passes one (the
+// newest-first order prints the age of updated_at); the two in-feed calls leave it out and
+// keep the age of first_published.
 function renderClusterCard(
   bundle: ClusterBundle,
   idx: number,
-  nowMs: number
+  nowMs: number,
+  ageBasis?: CardAgeBasis
 ) {
   const hoursAgo =
     (nowMs - new Date(bundle.cluster.updated_at).getTime()) / 3_600_000;
@@ -199,6 +204,7 @@ function renderClusterCard(
         isWireRedistribution={bundle.isWireRedistribution}
         effectiveArticleCount={bundle.effectiveArticleCount}
         headingLevel={3}
+        ageBasis={ageBasis}
       />
     </div>
   );
@@ -563,7 +569,9 @@ export async function HomeFeed({
   let renderIndex = 0;
 
   // "Günün Tayf'ı" teaser: page 1, no search, only after the first rendered
-  // section so it never sits above the first story card.
+  // section so it never sits above the first story card. A named <section>, not
+  // an <aside>: it sits inside <main>, where a complementary landmark must not
+  // be nested (h192-a11y-2).
   const teaserSlot = dailyTeaserSlot({
     page: safePage,
     q,
@@ -571,9 +579,9 @@ export async function HomeFeed({
     nowMs,
   });
   const teaser = teaserSlot ? (
-    <aside aria-label="Günün Tayf'ı">
+    <section aria-label="Günün Tayf'ı">
       <DailyGameTeaser puzzleNumber={teaserSlot.puzzleNumber} />
-    </aside>
+    </section>
   ) : null;
 
   // h170-roadmap-3: the compact "Yükselen konular" rail. Page 1 of the plain feed only (no search, no
@@ -735,8 +743,10 @@ export async function HomeFeed({
                 <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
               </div>
               <div className="space-y-4">
+                {/* h192-yeni-1: the newest-first list is ordered by updated_at, so its age pill reads
+                    "Güncellendi N saat önce"; the ranked list (shownSort null) keeps the plain age. */}
                 {view.archive.map((b) =>
-                  renderClusterCard(b, renderIndex++, nowMs)
+                  renderClusterCard(b, renderIndex++, nowMs, cardAgeBasis(shownSort))
                 )}
               </div>
             </section>

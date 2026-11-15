@@ -254,11 +254,12 @@ describe("215 search_cluster_ids_new: the file, ledger and transaction", () => {
     expect(readdirSync(MIGRATIONS_DIR).filter((f) => f.startsWith("197_") || f.startsWith("202_"))).toEqual([]);
   });
 
-  it("no other migration defines search_cluster_ids_new", () => {
+  it("only 215 and 216 define search_cluster_ids_new (216 is a create or replace of 215's function)", () => {
     const definers = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
-      .filter((f) => collapse(stripComments(readFileSync(resolve(MIGRATIONS_DIR, f), "utf8"))).includes("function public.search_cluster_ids_new("));
-    expect(definers).toEqual([FILE_215]);
+      .filter((f) => collapse(stripComments(readFileSync(resolve(MIGRATIONS_DIR, f), "utf8"))).includes("function public.search_cluster_ids_new("))
+      .sort();
+    expect(definers).toEqual([FILE_215, "216_search_cluster_ids_new_content_words.sql"]);
   });
 
   it("runs in one transaction with a bounded lock wait", () => {

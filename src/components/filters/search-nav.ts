@@ -20,8 +20,15 @@ export function searchNavTarget({
     params.set("q", q);
   } else {
     params.delete("q");
+    // arsiv and sirala are ignored without q: leaving them would keep stale
+    // params in the URL of the bare feed.
+    params.delete("sirala");
   }
+  // A new query starts at its first page: page and the archive page (arsiv)
+  // belong to the old result list. The reader's chosen order (sirala) persists
+  // for a non-empty query.
   params.delete("page");
+  params.delete("arsiv");
   const qs = params.toString();
   return qs ? `${pathname}?${qs}` : pathname;
 }
