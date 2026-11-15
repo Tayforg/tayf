@@ -1751,3 +1751,163 @@ describe("/trends page — dark voting sources caveat (h90-trends-2)", () => {
     expect(code).not.toMatch(/new Date\b/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h194-a11y-2 (WCAG 1.3.1 / 2.4.6): the 30-day chart, its legend and its data
+// table used to sit in an unlabelled <div> right under the h2 'Yükselen Konular',
+// so heading navigation attributed them to the rising topics. The chart card is
+// now its own <section> named by an sr-only <h2>, with no visible change (the
+// card's classes are unchanged, and an sr-only element is out of flow).
+// ---------------------------------------------------------------------------
+
+const CHART_HEADING_ID = "gunluk-haber-sayisi";
+const CHART_HEADING_TEXT = "Günlük haber sayısı, son 30 gün";
+const CHART_CARD_CLASS = "rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6 space-y-4";
+
+/** The chart card: the <section> that names itself with the sr-only heading. */
+function chartSection(tree: unknown): Elementish | undefined {
+  return collectElements(tree).find(
+    (el) => el.type === "section" && el.props?.["aria-labelledby"] === CHART_HEADING_ID,
+  );
+}
+
+/** The whole page tree as server-rendered HTML (the page's own <h2>s, ids and all). */
+function pageMarkup(tree: unknown): string {
+  return renderToStaticMarkup(tree as React.ReactElement);
+}
+
+/** `{ level, id, text }` of every <h1>/<h2> in the markup, in document order. */
+function headingOutline(html: string): { level: string; id: string | null; text: string }[] {
+  return [...html.matchAll(/<h([12])\b([^>]*)>([^<]*)<\/h\1>/g)].map((m) => ({
+    level: m[1]!,
+    id: m[2]!.match(/\bid="([^"]*)"/)?.[1] ?? null,
+    text: m[3]!,
+  }));
+}
+
+describe("/trends page — the chart card has its own heading (h194-a11y-2)", () => {
+  beforeEach(() => {
+    mockRising = RISING_OK;
+  });
+
+  it("names the chart card with an <h2 id> read 'Günlük haber sayısı, son 30 gün'", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const tree = await TrendsPage();
+
+    const section = chartSection(tree);
+    expect(section).toBeDefined();
+    const kids = section!.props!.children as Elementish[];
+    const h2 = kids[0]!;
+    expect(h2.type).toBe("h2");
+    expect(h2.props?.id).toBe(CHART_HEADING_ID);
+    expect(h2.props?.children).toBe(CHART_HEADING_TEXT);
+  });
+
+  it("the heading is sr-only, so there is no visible change", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const section = chartSection(await TrendsPage());
+
+    const h2 = (section!.props!.children as Elementish[])[0]!;
+    expect(h2.props?.className).toBe("sr-only");
+  });
+
+  it("the card keeps its classes: only the element changed, from a <div> to a <section>", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const section = chartSection(await TrendsPage());
+
+    expect(section!.props?.className).toBe(CHART_CARD_CLASS);
+  });
+
+  it("the section holds the chart row, the legend list and the 'Günlük sayıları tablo olarak göster' details", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const section = chartSection(await TrendsPage());
+
+    const inside = collectElements(section!.props!.children);
+    expect(inside.filter((el) => el.props?.["data-trends-chart"] !== undefined)).toHaveLength(1);
+    const legends = inside.filter((el) => el.type === "ul");
+    expect(legends).toHaveLength(1);
+    expect(collectText(legends[0]).join(" ")).toContain(ZONE_META.iktidar.label);
+    const details = inside.filter((el) => el.type === "details");
+    expect(details).toHaveLength(1);
+    expect(collectText(details[0]).join(" ")).toContain("Günlük sayıları tablo olarak göster");
+  });
+
+  it("keeps Yükselen Konular right after the hero and the chart section right after it, each with its own h2", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const tree = await TrendsPage();
+
+    const kids = rootChildren(tree);
+    expect(kids[0]?.type).toBe(PageHero);
+    expect(kids[1]?.type).toBe(RisingTopics);
+    expect(kids[2]).toBe(chartSection(tree));
+    const outline = headingOutline(pageMarkup(tree));
+    expect(outline.map((h) => [h.level, h.id, h.text])).toEqual([
+      ["1", null, "Medya DNA trendi"],
+      ["2", "yukselen-konular", "Yükselen Konular"],
+      ["2", CHART_HEADING_ID, CHART_HEADING_TEXT],
+    ]);
+  });
+
+  it("serialises the section with aria-labelledby pointing at the heading's id", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const html = pageMarkup(await TrendsPage());
+
+    expect(html).toContain(`<section aria-labelledby="${CHART_HEADING_ID}" class="${CHART_CARD_CLASS}">`);
+    expect(html).toContain(`<h2 id="${CHART_HEADING_ID}" class="sr-only">${CHART_HEADING_TEXT}</h2>`);
+    // The heading is the card's first child (before the caption row).
+    expect(html).toMatch(
+      new RegExp(`<section aria-labelledby="${CHART_HEADING_ID}"[^>]*><h2 id="${CHART_HEADING_ID}"`),
+    );
+  });
+
+  it("heading ids are unique on the page", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const html = pageMarkup(await TrendsPage());
+
+    expect(html.match(new RegExp(`\\sid="${CHART_HEADING_ID}"`, "g"))).toHaveLength(1);
+    const ids = headingOutline(html).flatMap((h) => (h.id === null ? [] : [h.id]));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("the all-zero branch still shows the chart card with its heading (the card holds the empty-state copy)", async () => {
+    mockBuckets = zeroBuckets();
+
+    const tree = await TrendsPage();
+
+    expect(chartSection(tree)).toBeDefined();
+    expect(collectText(chartSection(tree)).join(" ")).toContain(EMPTY_COPY);
+    expect(pageMarkup(tree).match(new RegExp(`\\sid="${CHART_HEADING_ID}"`, "g"))).toHaveLength(1);
+  });
+
+  it("the unavailable (null buckets) branch renders no chart heading: there is no chart", async () => {
+    mockBuckets = null;
+
+    const tree = await TrendsPage();
+    const html = pageMarkup(tree);
+
+    expect(chartSection(tree)).toBeUndefined();
+    expect(html).not.toContain(CHART_HEADING_ID);
+    expect(html).not.toContain(CHART_HEADING_TEXT);
+    // Yükselen Konular keeps its own heading, and the error card is untouched.
+    expect(headingOutline(html).map((h) => h.id)).toEqual([null, "yukselen-konular"]);
+    expect(collectText(tree).join(" ")).toContain(UNAVAILABLE_COPY);
+  });
+
+  it("keeps the chart's scroller region name and svg summary (the heading adds, never replaces)", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const tree = await TrendsPage();
+
+    const scroller = collectElements(chartSection(tree)).find((el) => el.type === ScrollToEnd);
+    expect(scroller?.props?.label).toBe("Son 30 gün grafiği (yatay kaydırılabilir)");
+    const svg = collectElements(chartSection(tree)).find((el) => el.type === "svg");
+    expect(svg?.props?.role).toBe("img");
+  });
+});

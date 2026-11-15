@@ -24,11 +24,13 @@ import { DenominatorNote } from "@/components/source/denominator-note";
 import {
   NearBlindspotList,
   nearBlindspotCountLabel,
+  wireMoreRowCountLabel,
 } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
 import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
 import { BLINDSPOT_LIST_LOOKBACK_DAYS } from "@/lib/clusters/blindspot-pick";
 import { RECALL_MATCH_NOTE } from "@/lib/clusters/recall-matched-zones";
+import { wireBadgeShort, wireBadgeTitle } from "@/lib/clusters/wire";
 import {
   blindspotCountLine,
   blindspotHealthWithdrawnLine,
@@ -473,8 +475,13 @@ export async function NearBlindspotsSection() {
 // shape as the "Kör noktaya yakın" rows. The percent comes from the row's
 // voting tally by largest remainder (dominantZonePercent), the very rule the
 // card's chip and bar use, so a row never prints a number its cluster page
-// disagrees with. The links do not prefetch: this list can hold a hundred
-// request-time cluster pages.
+// disagrees with. A wire claim's row (h194-wire-1) prints the cluster page's
+// distinct-text count beside the votes counted, plus the short wire cue, as its
+// card does; a row cached before the wire fields existed reads as a plain one.
+// A wire row keeps the aggregator tooltip on its count only when its votes are
+// fewer than its distinct texts, as the card does (cardSourceCountTitle).
+// The links do not prefetch: this list can hold a hundred request-time cluster
+// pages.
 function MoreBlindspotList({ rows }: { rows: BlindspotMoreRow[] }) {
   return (
     <section
@@ -495,6 +502,16 @@ function MoreBlindspotList({ rows }: { rows: BlindspotMoreRow[] }) {
             row.votingZoneCounts.iktidar +
             row.votingZoneCounts.bagimsiz +
             row.votingZoneCounts.muhalefet;
+          const wireTexts =
+            row.isWire === true &&
+            row.effectiveArticleCount !== undefined &&
+            row.effectiveArticleCount > 0
+              ? row.effectiveArticleCount
+              : null;
+          const countTitle =
+            wireTexts !== null && votingTotal >= wireTexts
+              ? undefined
+              : "Toplayıcı ve niş kaynaklar spektruma sayılmaz.";
           return (
             <li
               key={row.id}
@@ -513,12 +530,19 @@ function MoreBlindspotList({ rows }: { rows: BlindspotMoreRow[] }) {
                 >
                   {`%${pct} ${meta.label}`}
                 </span>
-                <span
-                  className="text-muted-foreground"
-                  title="Toplayıcı ve niş kaynaklar spektruma sayılmaz."
-                >
-                  {nearBlindspotCountLabel(row.sourceCount, votingTotal)}
+                <span className="text-muted-foreground" title={countTitle}>
+                  {wireTexts !== null
+                    ? wireMoreRowCountLabel(wireTexts, votingTotal)
+                    : nearBlindspotCountLabel(row.sourceCount, votingTotal)}
                 </span>
+                {wireTexts !== null && (
+                  <span
+                    className="text-muted-foreground"
+                    title={wireBadgeTitle(wireTexts)}
+                  >
+                    {wireBadgeShort(row.sourceCount, wireTexts)}
+                  </span>
+                )}
               </div>
             </li>
           );

@@ -558,6 +558,138 @@ describe("GET /rss/gundem-<key>.xml", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h194-wire-1: a wire-redistribution cluster in a topic or entity feed prints
+// its distinct-text count and the wire note, as /rss.xml and the cluster page do
+// ('3 kaynak (2 sınıflandırılmış)' contradicted the page's '1 kaynak · Tek
+// kaynaktan dağıtıldı · 3 kopya'). A non-wire cluster keeps today's string.
+// ---------------------------------------------------------------------------
+
+describe("wire-redistribution clusters in topic and entity feeds (h194-wire-1)", () => {
+  // 3 members: one iktidar voter, one muhalefet voter, one aggregator that never votes.
+  const WIRE_SOURCES = [
+    { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
+    { id: "s2", name: "B", bias: "opposition", kind: "outlet" },
+    { id: "s3", name: "C", bias: "center", kind: "aggregator" },
+  ];
+
+  const WIRE_DESCRIPTION =
+    "1 kaynak · 2 sınıflandırılmış · İktidar 1 · Bağımsız 0 · Muhalefet 1. Tek kaynaktan dağıtıldı · 3 kopya.";
+  const PLAIN_DESCRIPTION =
+    "3 kaynak (2 sınıflandırılmış) · İktidar 1 · Bağımsız 0 · Muhalefet 1";
+
+  function wireBundle(overrides: Record<string, unknown> = {}) {
+    return bundle({
+      sources: WIRE_SOURCES,
+      isWireRedistribution: true,
+      effectiveArticleCount: 1,
+      ...overrides,
+    });
+  }
+
+  function descriptionOf(body: string): string | undefined {
+    return /<item>[\s\S]*?<description>([^<]*)<\/description>/.exec(body)?.[1];
+  }
+
+  it("a topic feed item for a wire cluster names the one text and the classified votes, and ends with the wire note", async () => {
+    mocks.topicClusters = { bundles: [wireBundle()], hasMore: false, page: 1 };
+    const body = await (await callRoute("spor.xml")).text();
+    expect(descriptionOf(body)).toBe(WIRE_DESCRIPTION);
+    expect(body).not.toContain("3 kaynak");
+  });
+
+  it("the same wire cluster through /rss/gundem-<key>.xml carries the same description", async () => {
+    mocks.hub = { bundles: [wireBundle()], total: 1, asOfMs: 0 };
+    const body = await (await callRoute("gundem-chp.xml")).text();
+    expect(descriptionOf(body)).toBe(WIRE_DESCRIPTION);
+  });
+
+  it("several texts behind the members: '2 kaynak · 6 sınıflandırılmış' and 'Ajans ağırlıklı · 6 haber, 2 farklı metin.'", async () => {
+    mocks.topicClusters = {
+      bundles: [
+        wireBundle({
+          sources: Array.from({ length: 6 }, (_, i) => ({
+            id: `w${i}`,
+            name: `W${i}`,
+            bias: i === 0 ? "center" : "pro_government",
+            kind: "outlet",
+          })),
+          effectiveArticleCount: 2,
+        }),
+      ],
+      hasMore: false,
+      page: 1,
+    };
+    const body = await (await callRoute("spor.xml")).text();
+    expect(descriptionOf(body)).toBe(
+      "2 kaynak · 6 sınıflandırılmış · İktidar 5 · Bağımsız 1 · Muhalefet 0. Ajans ağırlıklı · 6 haber, 2 farklı metin.",
+    );
+  });
+
+  it("wire but the votes do not exceed the texts: the parenthesised head, still followed by the wire note", async () => {
+    // 6 members, 5 texts, 2 voters: wireSourceCountHead falls back to sourceCountHead.
+    mocks.topicClusters = {
+      bundles: [
+        wireBundle({
+          sources: [
+            { id: "a", name: "A", bias: "pro_government", kind: "outlet" },
+            { id: "b", name: "B", bias: "opposition", kind: "outlet" },
+            ...Array.from({ length: 4 }, (_, i) => ({
+              id: `g${i}`,
+              name: `G${i}`,
+              bias: "center",
+              kind: "aggregator",
+            })),
+          ],
+          effectiveArticleCount: 5,
+        }),
+      ],
+      hasMore: false,
+      page: 1,
+    };
+    const body = await (await callRoute("spor.xml")).text();
+    expect(descriptionOf(body)).toBe(
+      "5 kaynak (2 sınıflandırılmış) · İktidar 1 · Bağımsız 0 · Muhalefet 1. Ajans ağırlıklı · 6 haber, 5 farklı metin.",
+    );
+  });
+
+  it("a non-wire bundle with the same members keeps '3 kaynak (2 sınıflandırılmış) · ...' on both paths", async () => {
+    mocks.topicClusters = {
+      bundles: [
+        bundle({ sources: WIRE_SOURCES, isWireRedistribution: false, effectiveArticleCount: 3 }),
+      ],
+      hasMore: false,
+      page: 1,
+    };
+    expect(descriptionOf(await (await callRoute("spor.xml")).text())).toBe(PLAIN_DESCRIPTION);
+
+    mocks.hub = {
+      bundles: [bundle({ sources: WIRE_SOURCES, isWireRedistribution: false, effectiveArticleCount: 3 })],
+      total: 1,
+      asOfMs: 0,
+    };
+    expect(descriptionOf(await (await callRoute("gundem-chp.xml")).text())).toBe(PLAIN_DESCRIPTION);
+  });
+
+  it("a bundle without the wire fields at all keeps today's string", async () => {
+    mocks.topicClusters = {
+      bundles: [bundle({ sources: WIRE_SOURCES })],
+      hasMore: false,
+      page: 1,
+    };
+    expect(descriptionOf(await (await callRoute("spor.xml")).text())).toBe(PLAIN_DESCRIPTION);
+  });
+
+  it("only a literal true counts as wire", async () => {
+    mocks.topicClusters = {
+      bundles: [wireBundle({ isWireRedistribution: "true" })],
+      hasMore: false,
+      page: 1,
+    };
+    expect(descriptionOf(await (await callRoute("spor.xml")).text())).toBe(PLAIN_DESCRIPTION);
+  });
+});
+
 const GOLDEN_DUNYA = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>

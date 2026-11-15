@@ -450,3 +450,271 @@ describe("blindspotsFeedResponse (h53-consistency-1)", () => {
     expect(res.status).toBe(503);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h194-wire-1: a wire-redistribution claim prints its DISTINCT-TEXT count and a
+// wire cue, exactly like the cluster page, embed and /rss.xml. The raw member
+// count ('14 kaynak') contradicted the page's own '7 kaynak · 14 haber, 7 farklı
+// metin'. Non-wire output (and a compact row cached before the new optional
+// fields) keeps today's strings byte for byte.
+// ---------------------------------------------------------------------------
+
+describe("wire-redistribution claims (h194-wire-1)", () => {
+  /** n members (one outlet each), all of them voting unless overridden by the tally. */
+  function members(n: number) {
+    return Array.from({ length: n }, (_, i) => ({
+      id: `w${i}`,
+      name: `W${i}`,
+      bias: "pro_government",
+      kind: "outlet",
+    }));
+  }
+
+  function wireCard(
+    id: string,
+    memberCount: number,
+    votes: { iktidar: number; bagimsiz: number; muhalefet: number },
+    effective: number,
+    overrides: Record<string, unknown> = {},
+  ): BlindspotBundle {
+    return bundle(id, {
+      sources: members(memberCount),
+      votingZoneCounts: votes,
+      isWireRedistribution: true,
+      effectiveArticleCount: effective,
+      ...overrides,
+    } as unknown as Partial<BlindspotBundle>);
+  }
+
+  function wireRow(
+    id: string,
+    memberCount: number,
+    votes: { iktidar: number; bagimsiz: number; muhalefet: number },
+    effective: number,
+    overrides: Partial<BlindspotMoreRow> = {},
+  ): BlindspotMoreRow {
+    return moreRow(id, {
+      sourceCount: memberCount,
+      votingZoneCounts: votes,
+      isWire: true,
+      effectiveArticleCount: effective,
+      ...overrides,
+    });
+  }
+
+  describe("a card (blindspotRssItem)", () => {
+    it("prints the distinct-text count, names the 13 classified votes and ends with the wire note (14 members, 7 texts)", () => {
+      const item = blindspotRssItem(
+        BASE,
+        wireCard("22c3980a", 14, { iktidar: 11, bagimsiz: 1, muhalefet: 1 }, 7, {
+          dominantPct: 11 / 13,
+        }),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 7 kaynak · 13 sınıflandırılmış · İktidar 11 · Bağımsız 1 · Muhalefet 1. Ajans ağırlıklı · 14 haber, 7 farklı metin.",
+      );
+      expect(item.description).not.toContain("14 kaynak");
+    });
+
+    it("six members on three texts: '3 kaynak · 5 sınıflandırılmış' and the several-texts note", () => {
+      const item = blindspotRssItem(
+        BASE,
+        wireCard("828d3955", 6, { iktidar: 5, bagimsiz: 0, muhalefet: 0 }, 3, {
+          dominantPct: 1,
+        }),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%100). 3 kaynak · 5 sınıflandırılmış · İktidar 5 · Bağımsız 0 · Muhalefet 0. Ajans ağırlıklı · 6 haber, 3 farklı metin.",
+      );
+    });
+
+    it("a single-text wire (3 copies, 1 text) says 'Tek kaynaktan dağıtıldı · 3 kopya.'", () => {
+      const item = blindspotRssItem(
+        BASE,
+        wireCard("5dfe869e", 3, { iktidar: 1, bagimsiz: 0, muhalefet: 1 }, 1),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%50). 1 kaynak · 2 sınıflandırılmış · İktidar 1 · Bağımsız 0 · Muhalefet 1. Tek kaynaktan dağıtıldı · 3 kopya.",
+      );
+    });
+
+    it("wire but the votes do not exceed the texts (7 texts, 6 votes): the parenthesised head, still followed by the wire note", () => {
+      const item = blindspotRssItem(
+        BASE,
+        wireCard("w-low", 14, { iktidar: 5, bagimsiz: 1, muhalefet: 0 }, 7, {
+          dominantPct: 5 / 6,
+        }),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%83). 7 kaynak (6 sınıflandırılmış) · İktidar 5 · Bağımsız 1 · Muhalefet 0. Ajans ağırlıklı · 14 haber, 7 farklı metin.",
+      );
+    });
+
+    it("a non-wire card keeps today's string, whatever its effective count", () => {
+      const item = blindspotRssItem(
+        BASE,
+        bundle("plain", {
+          sources: members(14),
+          votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+          isWireRedistribution: false,
+          effectiveArticleCount: 7,
+        } as unknown as Partial<BlindspotBundle>),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 14 kaynak (13 sınıflandırılmış) · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+      );
+    });
+
+    it("a bundle without the wire fields at all keeps today's string (isWireRedistribution undefined)", () => {
+      const raw = bundle("legacy", {
+        sources: members(14),
+        votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+      } as unknown as Partial<BlindspotBundle>) as unknown as Record<string, unknown>;
+      delete raw.isWireRedistribution;
+      delete raw.effectiveArticleCount;
+      expect(blindspotRssItem(BASE, raw as unknown as BlindspotBundle).description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 14 kaynak (13 sınıflandırılmış) · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+      );
+    });
+
+    it("wire with a zero effective count carries no evidence of the texts: today's string, no wire note", () => {
+      const item = blindspotRssItem(
+        BASE,
+        wireCard("w-zero", 14, { iktidar: 11, bagimsiz: 1, muhalefet: 1 }, 0),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 14 kaynak (13 sınıflandırılmış) · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+      );
+    });
+  });
+
+  describe("a compact row (blindspotMoreRssItem)", () => {
+    it("six members, two texts: '2 kaynak · 6 sınıflandırılmış' and the several-texts note", () => {
+      const item = blindspotMoreRssItem(
+        BASE,
+        wireRow("55e2c33a", 6, { iktidar: 5, bagimsiz: 1, muhalefet: 0 }, 2),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%83). 2 kaynak · 6 sınıflandırılmış · İktidar 5 · Bağımsız 1 · Muhalefet 0. Ajans ağırlıklı · 6 haber, 2 farklı metin.",
+      );
+    });
+
+    it("14 members, 7 texts: the same string as the card of the same claim", () => {
+      const votes = { iktidar: 11, bagimsiz: 1, muhalefet: 1 };
+      const row = blindspotMoreRssItem(BASE, wireRow("same", 14, votes, 7));
+      const card = blindspotRssItem(BASE, wireCard("same", 14, votes, 7));
+      expect(row.description).toBe(card.description);
+      expect(row.description).toContain("7 kaynak · 13 sınıflandırılmış");
+    });
+
+    it("a single-text wire row says 'Tek kaynaktan dağıtıldı · 3 kopya.'", () => {
+      const item = blindspotMoreRssItem(
+        BASE,
+        wireRow("single", 3, { iktidar: 1, bagimsiz: 0, muhalefet: 1 }, 1),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%50). 1 kaynak · 2 sınıflandırılmış · İktidar 1 · Bağımsız 0 · Muhalefet 1. Tek kaynaktan dağıtıldı · 3 kopya.",
+      );
+    });
+
+    it("wire but the votes do not exceed the texts: the parenthesised head and the wire note", () => {
+      const item = blindspotMoreRssItem(
+        BASE,
+        wireRow("low", 14, { iktidar: 5, bagimsiz: 1, muhalefet: 0 }, 7),
+      );
+      expect(item.description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%83). 7 kaynak (6 sınıflandırılmış) · İktidar 5 · Bağımsız 1 · Muhalefet 0. Ajans ağırlıklı · 14 haber, 7 farklı metin.",
+      );
+    });
+
+    it("a row WITHOUT the new optional fields (payload cached before them) keeps today's exact string", () => {
+      const row = moreRow("old", {
+        sourceCount: 14,
+        votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+      });
+      expect("isWire" in row).toBe(false);
+      expect("effectiveArticleCount" in row).toBe(false);
+      expect(blindspotMoreRssItem(BASE, row).description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 14 kaynak (13 sınıflandırılmış) · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+      );
+    });
+
+    it("isWire without an effective count (a partial payload) keeps today's string", () => {
+      const row = moreRow("partial", {
+        sourceCount: 14,
+        votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+        isWire: true,
+      });
+      expect(blindspotMoreRssItem(BASE, row).description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 14 kaynak (13 sınıflandırılmış) · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+      );
+    });
+
+    it("isWire false with an effective count keeps today's string", () => {
+      const row = moreRow("not-wire", {
+        sourceCount: 14,
+        votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+        isWire: false,
+        effectiveArticleCount: 7,
+      });
+      expect(blindspotMoreRssItem(BASE, row).description).toBe(
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 14 kaynak (13 sınıflandırılmış) · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+      );
+    });
+  });
+
+  describe("through buildBlindspotsRssXml and blindspotsFeedResponse", () => {
+    const WIRE_CARD_DESCRIPTION =
+      "Kör nokta: ağırlıkla İktidar kaynakları (%84). 7 kaynak · 13 sınıflandırılmış · İktidar 11 · Bağımsız 1 · Muhalefet 1. Ajans ağırlıklı · 14 haber, 7 farklı metin.";
+    const WIRE_ROW_DESCRIPTION =
+      "Kör nokta: ağırlıkla İktidar kaynakları (%83). 2 kaynak · 6 sınıflandırılmış · İktidar 5 · Bağımsız 1 · Muhalefet 0. Ajans ağırlıklı · 6 haber, 2 farklı metin.";
+
+    function descriptions(xml: string): string[] {
+      return [...xml.matchAll(/<description>(Kör nokta[^<]*)<\/description>/g)].map((m) => m[1]!);
+    }
+
+    it("a wire card and a wire row each carry the wire description in the XML, a plain row stays as before", () => {
+      const xml = buildBlindspotsRssXml(
+        BASE,
+        [wireCard("c-wire", 14, { iktidar: 11, bagimsiz: 1, muhalefet: 1 }, 7)],
+        "/blindspots/rss.xml",
+        [
+          wireRow("m-wire", 6, { iktidar: 5, bagimsiz: 1, muhalefet: 0 }, 2),
+          moreRow("m-plain"),
+        ],
+      );
+      expect(descriptions(xml)).toEqual([
+        WIRE_CARD_DESCRIPTION,
+        WIRE_ROW_DESCRIPTION,
+        "Kör nokta: ağırlıkla İktidar kaynakları (%84). 13 kaynak · İktidar 11 · Bağımsız 1 · Muhalefet 1",
+      ]);
+    });
+
+    it("a feed of non-wire claims is byte-identical to the same feed built without the wire fields", () => {
+      const plain = [bundle("c1"), bundle("c2")];
+      const stripped = plain.map((b) => {
+        const copy = { ...b } as unknown as Record<string, unknown>;
+        delete copy.isWireRedistribution;
+        delete copy.effectiveArticleCount;
+        return copy as unknown as BlindspotBundle;
+      });
+      const rows = [moreRow("m1"), moreRow("m2")];
+      expect(buildBlindspotsRssXml(BASE, plain, "/blindspots/rss.xml", rows)).toBe(
+        buildBlindspotsRssXml(BASE, stripped, "/blindspots/rss.xml", rows),
+      );
+    });
+
+    it("blindspotsFeedResponse serves the wire descriptions for a card and a compact row", async () => {
+      mocks.result = {
+        bundles: [wireCard("c-wire", 14, { iktidar: 11, bagimsiz: 1, muhalefet: 1 }, 7)],
+        more: [wireRow("m-wire", 6, { iktidar: 5, bagimsiz: 1, muhalefet: 0 }, 2)],
+      };
+      const res = await blindspotsFeedResponse("/rss/kor-noktalar.xml");
+      expect(res.status).toBe(200);
+      expect(descriptions(await res.text())).toEqual([
+        WIRE_CARD_DESCRIPTION,
+        WIRE_ROW_DESCRIPTION,
+      ]);
+    });
+  });
+});

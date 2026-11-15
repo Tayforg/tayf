@@ -262,7 +262,21 @@ export default async function TrendsPage() {
       />
       <RisingTopics data={rising} />
 
-      <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6 space-y-4">
+      {/* The chart card is its own labelled section (h194-a11y-2). It used to
+          be a bare <div> under the h2 'Yükselen Konular', so heading navigation
+          filed the chart, legend and table under the rising topics. The h2 is
+          sr-only, so it is out of flow and the card looks the same: Tailwind 4's
+          space-y puts its margin on the element itself (`> :not(:last-child)`,
+          zero specificity, so sr-only's own margin wins) and never on the next
+          sibling. Its id is unique on the page; the error branch above has no
+          chart, so no heading there. */}
+      <section
+        aria-labelledby="gunluk-haber-sayisi"
+        className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6 space-y-4"
+      >
+        <h2 id="gunluk-haber-sayisi" className="sr-only">
+          Günlük haber sayısı, son 30 gün
+        </h2>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs text-muted-foreground space-y-0.5">
             <div>
@@ -496,7 +510,7 @@ export default async function TrendsPage() {
             Son 30 gün için veri bulunamadı.
           </p>
         ) : null}
-      </div>
+      </section>
     </div>
   );
 }

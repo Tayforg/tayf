@@ -8,6 +8,7 @@ import {
   type TopicSlug,
 } from "@/lib/clusters/topic-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
 import {
   ENTITY_HUB_LIMIT,
   ENTITY_HUB_WINDOW_DAYS,
@@ -27,6 +28,7 @@ import {
   formatZoneLine,
   sourceCountHead,
   votingZoneCounts,
+  wireSourceCountHead,
 } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 
@@ -88,14 +90,24 @@ function clusterItem(base: string, campaign: string, bundle: ClusterBundle): Rss
   // voting count in parentheses when they differ (see sourceCountHead).
   const counts = votingZoneCounts(bundle.sources);
   const zoneLine = formatZoneLine(counts);
-  const head = sourceCountHead(bundle.sources.length, counts);
+
+  // h194-wire-1: a wire redistribution is counted in distinct texts, as on the
+  // cluster page, the embed and /rss.xml: "N kaynak" is its effective count
+  // (naming the classified votes when they outnumber it) and the wire note
+  // closes the description, in the shape /rss.xml gives it. Every other
+  // cluster keeps the line it always had.
+  const effective = bundle.effectiveArticleCount ?? bundle.sources.length;
+  const description =
+    bundle.isWireRedistribution === true && effective > 0
+      ? `${wireSourceCountHead(effective, counts, true)} · ${zoneLine}. ${wireBadgeLabel(bundle.sources.length, effective)}.`
+      : `${sourceCountHead(bundle.sources.length, counts)} · ${zoneLine}`;
 
   return {
     title: bundle.cluster.title_tr,
     link,
     guid: `${base}/cluster/${bundle.cluster.id}`,
     pubDate: bundle.cluster.first_published,
-    description: `${head} · ${zoneLine}`,
+    description,
   };
 }
 

@@ -2300,3 +2300,211 @@ describe("/blindspots page — the head reveals before the card list (h166-perf-
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// h194-wire-1: the compact "Diğer kör noktalar" row of a wire claim printed the
+// raw member count ('14 kaynak · 13 sayıldı') beside a card and a cluster page
+// that say '7 kaynak · 14 haber, 7 farklı metin'. A wire row now prints the
+// distinct-text count and the short wire cue; a non-wire row (and a row cached
+// before the new fields) keeps today's label.
+// ---------------------------------------------------------------------------
+
+describe("/blindspots page — the compact rows of wire claims (h194-wire-1)", () => {
+  const COUNTS = (iktidar: number, bagimsiz: number, muhalefet: number) => ({
+    iktidar,
+    bagimsiz,
+    muhalefet,
+  });
+
+  function cardFixture(id: string) {
+    return {
+      cluster: {
+        id,
+        title_tr: `Kart ${id}`,
+        summary_tr: "",
+        bias_distribution: {},
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        article_count: 5,
+        first_published: "2026-11-01T09:00:00.000Z",
+        updated_at: "2026-11-05T11:00:00.000Z",
+      },
+      articles: [],
+      sources: [],
+      dominantZone: "iktidar" as MediaDnaZone,
+      dominantPct: 1,
+      votingZoneCounts: COUNTS(5, 0, 0),
+      isWireRedistribution: false,
+      effectiveArticleCount: 5,
+    };
+  }
+
+  function rowFixture(
+    id: string,
+    sourceCount: number,
+    counts: { iktidar: number; bagimsiz: number; muhalefet: number },
+    wire: { isWire?: boolean; effectiveArticleCount?: number } = {},
+  ) {
+    const voting = counts.iktidar + counts.bagimsiz + counts.muhalefet;
+    return {
+      id,
+      title: `Kompakt ${id}`,
+      dominantZone: "iktidar" as MediaDnaZone,
+      dominantPct: counts.iktidar / voting,
+      sourceCount,
+      firstPublished: "2026-11-04T10:00:00.000Z",
+      updatedAt: "2026-11-04T12:00:00.000Z",
+      votingZoneCounts: counts,
+      recallMatchedZones: [] as MediaDnaZone[],
+      ...wire,
+    };
+  }
+
+  /** Renders the page's compact list for `rows` and returns its markup. */
+  async function renderRows(rows: unknown[]): Promise<string> {
+    getBlindspots.mockResolvedValueOnce(okResult([cardFixture("c1")], rows));
+    const tree = await BlindspotsFeed();
+    const lists = collectElements(tree).filter(
+      (el) =>
+        typeof el.type === "function" &&
+        (el.type as { name?: string }).name === "MoreBlindspotList",
+    );
+    expect(lists).toHaveLength(1);
+    const list = lists[0] as { type: React.FunctionComponent; props: object };
+    return renderToStaticMarkup(createElement(list.type, list.props));
+  }
+
+  it("a wire row prints the distinct-text count with the votes counted, and the short wire cue, never the raw member count", async () => {
+    const html = await renderRows([
+      rowFixture("22c3980a", 14, COUNTS(11, 1, 1), { isWire: true, effectiveArticleCount: 7 }),
+    ]);
+
+    expect(html).toContain("7 kaynak · 13 sayıldı");
+    expect(html).toContain("14 haber · 7 farklı metin");
+    expect(html).not.toContain("14 kaynak");
+    // The chip is unchanged: %84 from the voting tally.
+    expect(html).toContain("%84 İktidar");
+  });
+
+  it("the wire cue explains itself on hover with the badge tooltip", async () => {
+    const html = await renderRows([
+      rowFixture("22c3980a", 14, COUNTS(11, 1, 1), { isWire: true, effectiveArticleCount: 7 }),
+    ]);
+
+    expect(html).toContain(
+      'title="Bu kümedeki haberlerin en az yarısı, başlığı farklı olsa da başka bir haberle aynı metni paylaşıyor"',
+    );
+  });
+
+  it("two texts behind six members and six votes: '2 kaynak · 6 sayıldı' and '6 haber · 2 farklı metin'", async () => {
+    const html = await renderRows([
+      rowFixture("55e2c33a", 6, COUNTS(5, 1, 0), { isWire: true, effectiveArticleCount: 2 }),
+    ]);
+
+    expect(html).toContain("2 kaynak · 6 sayıldı");
+    expect(html).toContain("6 haber · 2 farklı metin");
+    expect(html).not.toContain("6 kaynak");
+  });
+
+  it("a single-text wire row says '3 kopya · tek kaynak'", async () => {
+    const html = await renderRows([
+      rowFixture("5dfe869e", 3, COUNTS(1, 0, 1), { isWire: true, effectiveArticleCount: 1 }),
+    ]);
+
+    expect(html).toContain("1 kaynak · 2 sayıldı");
+    expect(html).toContain("3 kopya · tek kaynak");
+    expect(html).toContain('title="Bu kümedeki haberlerin tamamı aynı ajans metninin kopyası"');
+  });
+
+  it("prints one number when the texts and the votes agree (6 texts, 6 votes)", async () => {
+    const html = await renderRows([
+      rowFixture("agree", 9, COUNTS(5, 1, 0), { isWire: true, effectiveArticleCount: 6 }),
+    ]);
+
+    expect(html).toContain(">6 kaynak<");
+    expect(html).not.toContain("sayıldı");
+    expect(html).toContain("9 haber · 6 farklı metin");
+  });
+
+  it("a non-wire row with 14 members and 13 voters still reads '14 kaynak · 13 sayıldı', with no wire cue", async () => {
+    const html = await renderRows([rowFixture("plain", 14, COUNTS(11, 1, 1))]);
+
+    expect(html).toContain("14 kaynak · 13 sayıldı");
+    expect(html).not.toContain("farklı metin");
+    expect(html).not.toContain("tek kaynak");
+  });
+
+  it("a row cached with isWire false and an effective count is a non-wire row", async () => {
+    const html = await renderRows([
+      rowFixture("not-wire", 14, COUNTS(11, 1, 1), { isWire: false, effectiveArticleCount: 7 }),
+    ]);
+
+    expect(html).toContain("14 kaynak · 13 sayıldı");
+    expect(html).not.toContain("7 kaynak");
+    expect(html).not.toContain("farklı metin");
+  });
+
+  it("isWire without an effective count (a partial payload) falls back to today's label", async () => {
+    const html = await renderRows([rowFixture("partial", 14, COUNTS(11, 1, 1), { isWire: true })]);
+
+    expect(html).toContain("14 kaynak · 13 sayıldı");
+    expect(html).not.toContain("farklı metin");
+  });
+
+  it("wire and plain rows side by side: each row keeps its own label", async () => {
+    const html = await renderRows([
+      rowFixture("w", 14, COUNTS(11, 1, 1), { isWire: true, effectiveArticleCount: 7 }),
+      rowFixture("p", 10, COUNTS(8, 0, 0)),
+    ]);
+
+    expect(html.match(/<li[ >]/g)).toHaveLength(2);
+    expect(html).toContain("7 kaynak · 13 sayıldı");
+    expect(html).toContain("10 kaynak · 8 sayıldı");
+    expect(html.match(/farklı metin/g)).toHaveLength(1);
+  });
+
+  // The count span's aggregator tooltip cannot explain a counted total larger
+  // than the source count, which is what a wire row prints when its votes exceed
+  // its distinct texts (the wire cue beside it has its own tooltip). A wire row
+  // keeps the tooltip only when its votes are fewer than its distinct texts, as
+  // the card does (cardSourceCountTitle).
+  describe("the aggregator tooltip on the count", () => {
+    const TIP = 'title="Toplayıcı ve niş kaynaklar spektruma sayılmaz."';
+
+    it("a wire row whose votes exceed its distinct texts (13 votes, 7 texts) has no aggregator tooltip, only the wire badge tooltip", async () => {
+      const html = await renderRows([
+        rowFixture("22c3980a", 14, COUNTS(11, 1, 1), { isWire: true, effectiveArticleCount: 7 }),
+      ]);
+
+      expect(html).toContain("7 kaynak · 13 sayıldı");
+      expect(html).not.toContain(TIP);
+      expect(html).toContain(
+        'title="Bu kümedeki haberlerin en az yarısı, başlığı farklı olsa da başka bir haberle aynı metni paylaşıyor"',
+      );
+    });
+
+    it("a wire row whose votes are fewer than its distinct texts (5 votes, 7 texts) keeps the aggregator tooltip", async () => {
+      const html = await renderRows([
+        rowFixture("fewer", 9, COUNTS(5, 0, 0), { isWire: true, effectiveArticleCount: 7 }),
+      ]);
+
+      expect(html).toContain(TIP);
+    });
+
+    it("a wire row whose votes equal its distinct texts (6 and 6) has no aggregator tooltip", async () => {
+      const html = await renderRows([
+        rowFixture("agree", 9, COUNTS(5, 1, 0), { isWire: true, effectiveArticleCount: 6 }),
+      ]);
+
+      expect(html).toContain(">6 kaynak<");
+      expect(html).not.toContain(TIP);
+    });
+
+    it("a non-wire row keeps the aggregator tooltip", async () => {
+      const html = await renderRows([rowFixture("plain", 14, COUNTS(11, 1, 1))]);
+
+      expect(html).toContain("14 kaynak · 13 sayıldı");
+      expect(html).toContain(TIP);
+    });
+  });
+});

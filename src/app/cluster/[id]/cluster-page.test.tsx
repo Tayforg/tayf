@@ -16,6 +16,7 @@ import type { BiasDistribution, Source } from "@/types";
 import { FramingComparison } from "@/components/story/framing-comparison";
 import { MediaDna } from "@/components/story/media-dna";
 import { StoryTimeline } from "@/components/story/story-timeline";
+import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption";
 import { FactCheckBox } from "@/components/story/fact-check-box";
 import { ThreadLink } from "@/components/story/thread-link";
 import { RelatedStories } from "@/components/story/related-stories";
@@ -396,6 +397,32 @@ function collectHeadings(node: unknown, out: string[] = []): string[] {
       return out;
     }
     if (el.props?.children !== undefined) collectHeadings(el.props.children, out);
+  }
+  return out;
+}
+
+/**
+ * Every heading element (h1..h6) that sits directly in the page tree, in
+ * document order, as `{ tag, text }`. Same walk as collectHeadings, but it
+ * records each heading's own text (its children's strings) and does NOT expand
+ * FramingComparison / MediaDna: components such as StoryTimeline, SourceKunye
+ * and CrossSpectrumCaption stay opaque elements here, so this sees only the
+ * headings page.tsx itself writes.
+ */
+function collectHeadingEls(
+  node: unknown,
+  out: Array<{ tag: string; text: string }> = [],
+): Array<{ tag: string; text: string }> {
+  if (Array.isArray(node)) {
+    for (const child of node) collectHeadingEls(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: { children?: ReactNode } };
+    if (typeof el.type === "string" && /^h[1-6]$/.test(el.type)) {
+      out.push({ tag: el.type, text: collectText(el.props?.children).join("") });
+    }
+    if (el.props?.children !== undefined) collectHeadingEls(el.props.children, out);
   }
   return out;
 }
@@ -2266,6 +2293,168 @@ describe("ClusterDetailPage — heading outline (react-1)", () => {
       if (h === "h2") sawH2 = true;
       if (h === "h3") expect(sawH2).toBe(true);
     }
+  });
+});
+
+// h194-a11y-1 (WCAG 1.3.1 / 2.4.6): the story summary's 'Özet — <outlet>' label
+// was a <span>, so the summary sat in the heading tree under 'Kim önce yazdı?'
+// (StoryTimeline's h2) and was unreachable by heading. It is now its own <h2>,
+// with no visible change. (langDetail / renderTree / FBB078B4_SOURCES are defined
+// further down; the first two are hoisted function declarations and the const is
+// only read when a test runs.)
+describe("ClusterDetailPage — the summary label is a heading (h194-a11y-1)", () => {
+  const SUMMARY = "Turkish President Erdoğan arrived in Seoul on Monday for a three-day state visit.";
+  const withSummary = () =>
+    langDetail({
+      sources: [FBB078B4_SOURCES[1]!, { slug: "sozcu", name: "Sözcü", bias: "opposition" }],
+      summary: SUMMARY,
+      seedIndex: 0,
+    });
+
+  it("renders exactly one <h2> whose text is the 'Özet — <outlet>' label", async () => {
+    const tree = await renderTree(withSummary());
+    const labels = collectHeadingEls(tree).filter((h) => h.text.startsWith("Özet —"));
+    expect(labels).toEqual([{ tag: "h2", text: "Özet — Daily Sabah" }]);
+  });
+
+  it("no longer renders the label as a <span>", async () => {
+    const tree = await renderTree(withSummary());
+    expect(
+      findElement(
+        tree,
+        (el) => el.type === "span" && collectText(el.props.children).join("").startsWith("Özet —"),
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps the bias badge outside the heading: the h2 holds only the label string", async () => {
+    const tree = await renderTree(withSummary());
+    const h2 = findElement(
+      tree,
+      (el) => el.type === "h2" && collectText(el.props.children).join("").startsWith("Özet —"),
+    );
+    expect(h2).not.toBeNull();
+    expect(h2!.props.children).toBe("Özet — Daily Sabah");
+  });
+
+  it("changes nothing visible: the h2 carries the label's classes inside the same flex row", async () => {
+    const tree = await renderTree(withSummary());
+    const h2 = findElement(
+      tree,
+      (el) => el.type === "h2" && collectText(el.props.children).join("").startsWith("Özet —"),
+    );
+    // globals.css gives every h1-h3 the serif heading font and -0.02em tracking,
+    // so font-sans and tracking-normal keep the old (sans, untracked) look, as in
+    // framing-comparison.tsx.
+    expect(String(h2!.props.className).split(" ")).toEqual(
+      expect.arrayContaining(["font-sans", "text-sm", "font-semibold", "tracking-normal", "text-foreground"]),
+    );
+    const row = findElement(
+      tree,
+      (el) =>
+        el.type === "div" &&
+        el.props.className === "flex items-center gap-1.5 text-sm font-semibold text-foreground",
+    );
+    expect(row).not.toBeNull();
+    expect(collectText(row!.props.children).join("")).toContain("Özet — Daily Sabah");
+  });
+
+  it("keeps the summary text and its lang attribute on the paragraph after the heading", async () => {
+    const tree = await renderTree(withSummary());
+    const p = findElement(
+      tree,
+      (el) => el.type === "p" && collectText(el.props.children).join("") === SUMMARY,
+    );
+    expect(p?.props.lang).toBe("en");
+  });
+
+  it("renders no 'Özet —' heading when the cluster has no summary", async () => {
+    // makeCluster() defaults summary_tr to a stored summary; a blank one yields none.
+    const detail = langDetail({ sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }] });
+    detail.cluster.summary_tr = "";
+    const tree = await renderTree(detail);
+    expect(collectHeadingEls(tree).filter((h) => h.text.startsWith("Özet —"))).toEqual([]);
+    expect(collectText(tree).join("")).not.toContain("Özet —");
+  });
+
+  it("still has exactly one h1, and the summary heading comes after it", async () => {
+    const tree = await renderTree(withSummary());
+    const headings = collectHeadingEls(tree);
+    expect(headings.filter((h) => h.tag === "h1")).toHaveLength(1);
+    const h1At = headings.findIndex((h) => h.tag === "h1");
+    const labelAt = headings.findIndex((h) => h.text.startsWith("Özet —"));
+    expect(labelAt).toBeGreaterThan(h1At);
+  });
+
+  // The page's real outline, with the five components that carry a heading
+  // expanded through the server render: the summary byline sits between 'Kim
+  // önce yazdı?' and 'Kaynak künyesi', the surprise note between 'Kaynak
+  // künyesi' and 'Aynı Haber, Farklı Dünyalar'.
+  it("document order: h1, Kim önce yazdı?, Özet —, Kaynak künyesi, Sürpriz kesişimler, Aynı Haber, Farklı Dünyalar", async () => {
+    const EXPANDED: unknown[] = [StoryTimeline, SourceKunye, CrossSpectrumCaption, FramingComparison];
+    const outline = (node: unknown, out: string[] = []): string[] => {
+      if (Array.isArray(node)) {
+        for (const child of node) outline(child, out);
+        return out;
+      }
+      if (node && typeof node === "object") {
+        const el = node as { type?: unknown; props?: { children?: ReactNode } };
+        if (typeof el.type === "string" && /^h[1-6]$/.test(el.type)) {
+          out.push(`${el.type} ${collectText(el.props?.children).join("")}`);
+        } else if (EXPANDED.includes(el.type)) {
+          const html = renderToStaticMarkup(node as ReactElement);
+          for (const m of html.matchAll(/<h([1-6])\b[^>]*>([^<]*)<\/h\1>/g)) {
+            out.push(`h${m[1]} ${m[2]}`);
+          }
+        } else if (el.props?.children !== undefined) {
+          outline(el.props.children, out);
+        }
+      }
+      return out;
+    };
+
+    // Five iktidar voters and one muhalefet voter: a cross-spectrum surprise.
+    // The slugs are hand-tagged ones, so the künye block renders too.
+    const slugs = Object.keys(SOURCE_METADATA).slice(0, 6);
+    const sources = slugs.map((slug, i) =>
+      makeSource({
+        id: slug,
+        slug,
+        name: `Kaynak ${i}`,
+        bias: i < 5 ? "pro_government" : "opposition",
+        kind: "outlet",
+      }),
+    );
+    const members = sources.map((s, i) =>
+      makeMember(`a${i}`, s, `2026-09-06T${String(12 - i).padStart(2, "0")}:00:00.000Z`),
+    );
+    members[0]!.article.description = SUMMARY;
+    const distribution = emptyDistribution();
+    distribution.pro_government = 5;
+    distribution.opposition = 1;
+    const cluster = makeCluster({ bias_distribution: distribution });
+    cluster.summary_tr = SUMMARY;
+    const tree = await renderTree({
+      cluster,
+      members,
+      allSources: sources,
+      wire: { isWireRedistribution: false, effectiveArticleCount: 6, memberCount: 6 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    });
+
+    const wanted = [
+      "h1",
+      "h2 Kim önce yazdı?",
+      "h2 Özet —",
+      "h2 Kaynak künyesi",
+      "h2 Sürpriz kesişimler",
+      "h2 Aynı Haber, Farklı Dünyalar",
+    ];
+    const seen = outline(tree)
+      .map((h) => (h.startsWith("h2 Özet —") ? "h2 Özet —" : h.startsWith("h1 ") ? "h1" : h))
+      .filter((h) => wanted.includes(h));
+    expect(seen).toEqual(wanted);
   });
 });
 

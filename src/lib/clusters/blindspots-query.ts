@@ -248,6 +248,21 @@ export interface BlindspotMoreRow {
   votingZoneCounts: Record<MediaDnaZone, number>;
   /** The card's `recallMatchedZones` (h106-blindspotbadges-1), kept so a row promoted to a card words itself the same way. */
   recallMatchedZones: MediaDnaZone[];
+  /**
+   * h194-wire-1: true when the claim is a wire redistribution (the card's
+   * `isWireRedistribution`). Present only on a wire claim's row, never `false`,
+   * so a non-wire row is exactly the shape it always was. Optional because a
+   * payload cached before the field lacks it; readers treat that as "not wire"
+   * and fall back to `sourceCount`.
+   */
+  isWire?: boolean;
+  /**
+   * h194-wire-1: the card's `effectiveArticleCount`, the distinct texts the
+   * cluster page prints as "N kaynak" for a wire claim (`sourceCount` stays the
+   * raw member count). Written together with `isWire`, so absent on the same
+   * rows and for the same reason.
+   */
+  effectiveArticleCount?: number;
 }
 
 /** Everything /blindspots, its feeds and the crons read from one fetch. */
@@ -529,6 +544,11 @@ function toMoreRow(b: BlindspotBundle): BlindspotMoreRow {
     updatedAt: b.cluster.updated_at,
     votingZoneCounts: { ...b.votingZoneCounts },
     recallMatchedZones: [...b.recallMatchedZones],
+    // h194-wire-1: only a wire claim carries the verdict, so every other row is
+    // byte-identical to what it was before the fields existed.
+    ...(b.isWireRedistribution
+      ? { isWire: true, effectiveArticleCount: b.effectiveArticleCount }
+      : {}),
   };
 }
 
