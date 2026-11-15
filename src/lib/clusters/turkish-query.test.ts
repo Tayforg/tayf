@@ -13,7 +13,9 @@ import {
   cleanQueryUnicode,
   foldTr,
   holdsLocativeWitness,
+  holdsNegatedWord,
   isTurkishSuffixTail,
+  negatedSearchWords,
   normaliseSearchQuery,
   pgLower,
   searchFoldedSibling,
@@ -2179,6 +2181,165 @@ describe("searchFoldedSibling: a one-letter hyphen compound (h157-search-3)", ()
       (q) => {
         expect(searchFoldedSibling(q.many)).not.toBeNull();
         expect(searchFoldedSibling(q.hyphens)).toBeNull();
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+// h196-search-2: the stem-fold arm of search_cluster_ids / _v2 / _new admits a row that names a negated word,
+// because the negated lexeme is over-cut ('fenerbah') while the stored folded stem is 'fenerbahce'
+// ('galatasaray -fenerbahçe' listed 5 headlines naming Fenerbahçe among 24). The app re-checks the negated words of
+// 5 letters or more against the row's own text; a shorter negation stays with the database.
+describe("negatedSearchWords (h196-search-2)", () => {
+  it.each([
+    ["galatasaray -fenerbahçe", ["fenerbahce"]],
+    ["galatasaray -fenerbahce", ["fenerbahce"]],
+    ["borsa -dolar", ["dolar"]],
+    ["GALATASARAY -FENERBAHÇE", ["fenerbahce"]],
+    ["galatasaray -İstanbulspor", ["istanbulspor"]],
+    ["galatasaray -fenerbahçe -fenerbahce", ["fenerbahce"]],
+    ["galatasaray -fenerbahçe -beşiktaş", ["fenerbahce", "besiktas"]],
+    ["-fenerbahçe galatasaray", ["fenerbahce"]],
+    ["galatasaray\t-fenerbahçe", ["fenerbahce"]],
+    ["borsa -dolar2026", ["dolar2026"]],
+  ])("%j -> %j", (q, expected) => {
+    expect(negatedSearchWords(q)).toEqual(expected);
+  });
+
+  it.each([
+    "iran -abd", // 3 letters: a word-start test would also drop 'abdullah'
+    "emekli -zam", // 3 letters: would also drop 'zaman'
+    "iran -özel", // 4 letters (ozel): would also drop 'özellikle'
+    "borsa -euro",
+    "iran -\"israil saldırısı\"", // a negated phrase is the database's business
+    "\"fenerbahçe\" -ukrayna", // a quote anywhere: phrases are the database's business
+    "ak-parti galatasaray", // a hyphen inside a word is no negation
+    "a - fenerbahçe", // a lone dash is no negation
+    "-e-okul", // a hyphen inside the negated word: not [a-z0-9]
+    "galatasaray fenerbahçe",
+    "galatasaray -",
+    "galatasaray --fenerbahçe",
+    "galatasaray -fener.bahçe",
+    "galatasaray -fenerbahçe\"",
+    "",
+    "   ",
+  ])("is [] for %j", (q) => {
+    expect(negatedSearchWords(q), q).toEqual([]);
+  });
+
+  it("keeps the words of 5 letters or more and drops the shorter ones in one query", () => {
+    expect(negatedSearchWords("galatasaray -abd -fenerbahçe -zam -özel -ukrayna")).toEqual(["fenerbahce", "ukrayna"]);
+  });
+
+  it("keeps the order of first appearance and at most 6 words", () => {
+    const q = ["-aaaaa", "-bbbbb", "-ccccc", "-aaaaa", "-ddddd", "-eeeee", "-fffff", "-ggggg", "-hhhhh"].join(" ");
+    expect(negatedSearchWords(q)).toEqual(["aaaaa", "bbbbb", "ccccc", "ddddd", "eeeee", "fffff"]);
+  });
+
+  it("works on the canonical key the archive search uses", () => {
+    for (const q of ["Galatasaray -Fenerbahçe", "galatasaray -fenerbahçe!", "GALATASARAY  -FENERBAHÇE"]) {
+      expect(negatedSearchWords(canonicalSearchQuery(q)), q).toEqual(["fenerbahce"]);
+    }
+  });
+
+  it("never throws on odd input and builds no RegExp from the query", () => {
+    for (const q of ["-(", "-[", "-a+++", "-.*", "-\\", "-$", "-\u0000abcde", "-\ud83d", "-😀😀😀😀😀"]) {
+      expect(() => negatedSearchWords(q), q).not.toThrow();
+      expect(negatedSearchWords(q), q).toEqual([]);
+    }
+  });
+
+  it("scales linearly in the query (CPU-time ladder): many negations, one long negation, many dashes", () => {
+    expectLinear(
+      (n) => ({
+        many: "-fenerbahce ".repeat(Math.ceil(n / 12)),
+        oneWord: rep("a", "-", "")(n),
+        dashes: rep("-", "", "")(n),
+      }),
+      (q) => {
+        expect(negatedSearchWords(q.many)).toEqual(["fenerbahce"]);
+        expect(negatedSearchWords(q.oneWord)).toHaveLength(1);
+        expect(negatedSearchWords(q.dashes)).toEqual([]);
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+describe("holdsNegatedWord (h196-search-2)", () => {
+  const holds = (text: string, word: string) => holdsNegatedWord(foldTr(text), word);
+
+  it.each([
+    "Galatasaray ve Fenerbahçe'nin fikstürü",
+    "galatasaray ve fenerbahce'nin fiksturu",
+    "Fenerbahçe",
+    "FENERBAHÇE",
+    "Fenerbahçeli taraftar",
+    "fenerbahceli taraftar",
+    "Galatasaray-Fenerbahçe derbisi",
+    "(Fenerbahçe) kazandı",
+    "Fenerbahçelilere müjde",
+    "derbi: fenerbahce",
+    "fenerbahce2026",
+  ])("true for %j (word 'fenerbahce')", (text) => {
+    expect(holds(text, "fenerbahce")).toBe(true);
+  });
+
+  it.each([
+    "Galatasaray derbisi",
+    "superfenerbahce",
+    "Süperfenerbahçe",
+    "bahçe",
+    "Fener'bahçe",
+    "fenerbah",
+    "fenerbahc",
+    "fener bahce",
+    "",
+    "   ",
+    "'-.,;",
+  ])("false for %j (word 'fenerbahce')", (text) => {
+    expect(holds(text, "fenerbahce")).toBe(false);
+  });
+
+  it("an empty word is false, whatever the text holds", () => {
+    expect(holdsNegatedWord("fenerbahce", "")).toBe(false);
+    expect(holdsNegatedWord("", "")).toBe(false);
+    expect(holdsNegatedWord("", "x")).toBe(false);
+  });
+
+  it("a word start is a prefix of a run of [a-z0-9]: an apostrophe splits runs, so Fenerbahçe'nin holds it and Fener'bahçe does not", () => {
+    expect(holds("Fenerbahçe'nin", "fenerbahce")).toBe(true);
+    expect(holds("Fener'bahçe", "fenerbahce")).toBe(false);
+    expect(holds("dolarlık", "dolar")).toBe(true);
+    expect(holds("milyar dolar", "dolar")).toBe(true);
+    expect(holds("dolarizasyon", "dolar")).toBe(true);
+    expect(holds("mdolar", "dolar")).toBe(false);
+  });
+
+  it("one holding word among many that do not is enough", () => {
+    expect(holds("Galatasaray ve Beşiktaş maçı; Fenerbahçe izledi", "fenerbahce")).toBe(true);
+    expect(holds("Galatasaray ve Beşiktaş maçı; Ankaragücü izledi", "fenerbahce")).toBe(false);
+  });
+
+  it("never throws on odd input, treats the word as plain text and never matches a word with a non-[a-z0-9] character", () => {
+    for (const word of ["(", "[", "a+", ".*", "\\", "kaza)", "a|b", "$", "e-posta", "naïve"]) {
+      expect(() => holdsNegatedWord("kaza (kaza) [x] a+ b e-posta naïve", word), word).not.toThrow();
+      expect(holdsNegatedWord("kaza (kaza) [x] a+ b e-posta naïve", word), word).toBe(false);
+    }
+  });
+
+  it("scales linearly in the text (CPU-time ladder): many words, one long word, many separators", () => {
+    expectLinear(
+      (n) => ({
+        words: "fenerbah ".repeat(Math.ceil(n / 9)),
+        oneWord: rep("f", "", "")(n),
+        separators: rep("'-.,; ", "", "fenerbahce")(n),
+      }),
+      (q) => {
+        expect(holdsNegatedWord(q.words, "fenerbahce")).toBe(false);
+        expect(holdsNegatedWord(q.oneWord, "fenerbahce")).toBe(false);
+        expect(holdsNegatedWord(q.separators, "fenerbahce")).toBe(true);
       },
       { n: 200_000, ceilingMs: 8_000 },
     );

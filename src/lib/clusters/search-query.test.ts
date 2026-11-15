@@ -166,6 +166,7 @@ import {
   searchClusters,
 } from "./search-query";
 import {
+  GEMINATE_ROOTS,
   MAX_SEARCH_QUERY_LENGTH,
   MAX_QUERY_VARIANTS,
   MAX_SEARCH_TERMS,
@@ -2702,15 +2703,189 @@ describe("searchClusters: the newest-first order (?sirala=yeni, h191)", () => {
       }
     });
 
-    it("makes no sibling and no locative call: a possessive, a bare vowel-final noun and a case suffix are the one typed call", async () => {
-      for (const q of ["elektrik zammı", "emlak vergisi", "tarla", "bolu kaza", "imamoğluna"]) {
+    // h196-search-1: a possessive ('elektrik zammı'), a doubled stem ('emlak vergisi') and a case suffix typed
+    // without an apostrophe ('imamoğluna') are stored under their root's stem, so the typed spelling alone found 0
+    // ('elektrik zammı' 0 against 7 for 'elektrik zam', 'imamoğluna' 0 against 96). The ONE call carries the typed
+    // spellings AND the root's, and folds the ROOT: lit_d of migration 215 needs every folded word as a word-start prefix
+    // of the display title, and 'zammi' would demand 'zamm'. The order is updated_at desc, so the merge never adds a row ahead
+    // of a newer typed row (the ranked order's reason for two calls); older typed hits can still fall out of migration 216's
+    // 150-candidate window, which the root spelling widens ('iran görüşmesi': 6 of 10 typed rows no longer listed).
+    const dedupe = (list: string[]) => {
+      const out: string[] = [];
+      for (const v of list) if (!out.includes(v)) out.push(v);
+      return out;
+    };
+
+    it("a possessive, a doubled stem and a case suffix send the typed AND the root spellings in ONE call, folded as the root", async () => {
+      for (const q of ["elektrik zammı", "emlak vergisi", "imamoğluna", "hakkı", "sırrı", "suriyede"]) {
         fixture.rpcCalls = [];
         fixture.newCalls = [];
         await searchClusters(q, 1, "yeni");
+        const key = canonicalSearchQuery(q);
+        const sibling = searchSiblingQuery(key);
+        if (sibling === null) throw new Error(`expected a root sibling for ${q}`);
+        const typed = turkishQueryVariants(key);
+        const expected = dedupe([...typed, ...turkishQueryVariants(sibling)]).slice(0, 6);
+        expect(fixture.rpcCalls, q).toEqual([]);
+        expect(fixture.v2Calls, q).toEqual([]);
+        expect(fixture.newCalls, q).toHaveLength(1);
+        expect(newAt(0).p_variants, q).toEqual(expected);
+        expect(newAt(0).p_variants.slice(0, typed.length), q).toEqual(typed);
+        expect(newAt(0).p_folded, q).toBe(foldTr(sibling));
+        expect(newAt(0).p_variants.length, q).toBeLessThanOrEqual(6);
+        expect(new Set(newAt(0).p_variants).size, q).toBe(newAt(0).p_variants.length);
+        for (const v of newAt(0).p_variants) expect(v.length, `${q}: ${v}`).toBeLessThanOrEqual(64);
+        expect(newAt(0).p_limit, q).toBe(24);
+        expect(newAt(0).p_offset, q).toBe(0);
+      }
+    });
+
+    it("pins the literal arguments of 'elektrik zammı': the typed and the root spellings, folded 'elektrik zam' (not 'zammi')", async () => {
+      await searchClusters("elektrik zammı", 1, "yeni");
+      expect(newAt(0).p_variants).toContain("elektrik zammı");
+      expect(newAt(0).p_variants).toContain("elektrik zam");
+      expect(newAt(0).p_folded).toBe("elektrik zam");
+      await searchClusters("imamoğluna", 1, "yeni");
+      expect(newAt(1).p_variants).toContain("imamoğluna");
+      expect(newAt(1).p_variants).toContain("imamoğlu");
+      expect(newAt(1).p_folded).toBe("imamoglu");
+    });
+
+    it("the other roots keep merging: 'hakkı' folds 'hak', 'sırrı' folds 'sir', 'suriyede' folds 'suriye', each with the typed spelling first", async () => {
+      const cases: Array<[string, string, string]> = [
+        ["hakkı", "hak", "hak"],
+        ["sırrı", "sır", "sir"],
+        ["suriyede", "suriye", "suriye"],
+      ];
+      for (const [q, root, folded] of cases) {
+        fixture.newCalls = [];
+        await searchClusters(q, 1, "yeni");
+        expect(fixture.newCalls, q).toHaveLength(1);
+        expect(newAt(0).p_variants[0], q).toBe(turkishQueryVariants(canonicalSearchQuery(q))[0]);
+        expect(newAt(0).p_variants, q).toContain(root);
+        expect(newAt(0).p_folded, q).toBe(folded);
+      }
+    });
+
+    // A prefix guard (review TS-1). Migration 216's lit_d is a filter over p_folded: every folded word must be a word-start
+    // prefix of the display title. The merge folds the SIBLING, so it is only safe when each folded sibling term is a prefix of
+    // the folded typed term. GEMINATE 'redd' -> 'ret' is the one root that is not: 'reddi' merged would demand a title word
+    // starting with 'ret' and drop the stories holding 'reddi' (replayed: 11 typed rows, 1 surviving the merge over pages 1-4).
+    it("'reddi', 'reddı' and 'başvurunun reddi' stay typed-only: ONE call, the typed variants and the typed folded text, no 'ret' anywhere", async () => {
+      for (const q of ["reddi", "reddı", "başvurunun reddi"]) {
+        fixture.rpcCalls = [];
+        fixture.v2Calls = [];
+        fixture.newCalls = [];
+        const key = canonicalSearchQuery(q);
+        expect(searchSiblingQuery(key), q).not.toBeNull();
+        await searchClusters(q, 1, "yeni");
+        expect(fixture.rpcCalls, q).toEqual([]);
+        expect(fixture.v2Calls, q).toEqual([]);
+        expect(fixture.newCalls, q).toHaveLength(1);
+        expect(newAt(0).p_variants, q).toEqual(turkishQueryVariants(key));
+        expect(newAt(0).p_folded, q).toBe(foldTr(key));
+        expect(newAt(0).p_variants.join(" | "), q).not.toMatch(/(^|[\s|])ret/);
+        expect(newAt(0).p_folded, q).not.toMatch(/(^|\s)ret/);
+        expect(newAt(0).p_limit, q).toBe(24);
+        expect(newAt(0).p_offset, q).toBe(0);
+      }
+      fixture.newCalls = [];
+      await searchClusters("reddi", 1, "yeni");
+      expect(newAt(0).p_variants).toEqual(["reddi"]);
+      expect(newAt(0).p_folded).toBe("reddi");
+    });
+
+    it("'reddi' on pages 1 to 4 is the typed arguments on every page, only p_offset moves (0, 24, 48, 72)", async () => {
+      for (const page of [1, 2, 3, 4]) await searchClusters("reddi", page, "yeni");
+      expect(fixture.newCalls).toHaveLength(4);
+      for (const i of [0, 1, 2, 3]) {
+        expect(newAt(i).p_variants, `page ${i + 1}`).toEqual(["reddi"]);
+        expect(newAt(i).p_folded, `page ${i + 1}`).toBe("reddi");
+      }
+      expect(fixture.newCalls.map((c) => (c as NewArgs).p_offset)).toEqual([0, 24, 48, 72]);
+    });
+
+    it("every GEMINATE root merges iff its folded root is a prefix of the folded doubled form + 'ı', and only 'redd' is not", async () => {
+      const unmerged: string[] = [];
+      for (const [doubled, root] of GEMINATE_ROOTS) {
+        const q = `${doubled}ı`;
+        const key = canonicalSearchQuery(q);
+        expect(searchSiblingQuery(key), q).toBe(root);
+        fixture.rpcCalls = [];
+        fixture.newCalls = [];
+        await searchClusters(q, 1, "yeni");
+        expect(fixture.newCalls, q).toHaveLength(1);
+        const prefix = foldTr(key).startsWith(foldTr(root));
+        if (prefix) {
+          expect(newAt(0).p_variants, q).toContain(root);
+          expect(newAt(0).p_folded, q).toBe(foldTr(root));
+        } else {
+          unmerged.push(doubled);
+          expect(newAt(0).p_variants, q).toEqual(turkishQueryVariants(key));
+          expect(newAt(0).p_folded, q).toBe(foldTr(key));
+        }
+      }
+      expect(unmerged).toEqual(["redd"]);
+    });
+
+    it("a bare vowel-final noun with no root sibling ('tarla', 'bolu kaza') is still the one typed call: the typed variants and the typed folded text, no locative", async () => {
+      for (const q of ["tarla", "bolu kaza"]) {
+        fixture.rpcCalls = [];
+        fixture.newCalls = [];
+        const key = canonicalSearchQuery(q);
+        expect(searchSiblingQuery(key), q).toBeNull();
+        await searchClusters(q, 1, "yeni");
         expect(fixture.rpcCalls, q).toEqual([]);
         expect(fixture.newCalls, q).toHaveLength(1);
-        expect(newAt(0).p_folded, q).toBe(foldTr(canonicalSearchQuery(q)));
+        expect(newAt(0).p_variants, q).toEqual(turkishQueryVariants(key));
+        expect(newAt(0).p_folded, q).toBe(foldTr(key));
       }
+    });
+
+    it("a query that holds websearch syntax or an alias sends the typed arguments only: a phrase, a negation, an 'or', AKP", async () => {
+      for (const q of ['"elektrik zammı"', "elektrik -zammı", "elektrik zammı or emlak vergisi", "AKP zammı", "AKP"]) {
+        fixture.rpcCalls = [];
+        fixture.newCalls = [];
+        await searchClusters(q, 1);
+        const typed = fixture.rpcCalls[0] as { p_variants: string[]; p_folded: string };
+        await searchClusters(q, 1, "yeni");
+        expect(fixture.newCalls, q).toHaveLength(1);
+        expect(newAt(0).p_variants, q).toEqual(typed.p_variants);
+        expect(newAt(0).p_folded, q).toBe(typed.p_folded);
+      }
+      fixture.newCalls = [];
+      await searchClusters('"elektrik zammı"', 1, "yeni");
+      expect(newAt(0).p_variants).toEqual(turkishQueryVariants('"elektrik zammı"'));
+      expect(newAt(0).p_folded).toBe('"elektrik zammi"');
+      await searchClusters("elektrik -zammı", 1, "yeni");
+      expect(newAt(1).p_variants).toEqual(turkishQueryVariants("elektrik -zammı"));
+      expect(newAt(1).p_folded).toBe("elektrik -zammi");
+    });
+
+    it("'imamoğluna' on pages 1 to 4: every page sends page 1's p_variants and p_folded, only p_offset moves (0, 24, 48, 72)", async () => {
+      for (const page of [1, 2, 3, 4]) await searchClusters("imamoğluna", page, "yeni");
+      expect(fixture.newCalls).toHaveLength(4);
+      expect(fixture.rpcCalls).toEqual([]);
+      expect(fixture.v2Calls).toEqual([]);
+      for (const i of [1, 2, 3]) {
+        expect(newAt(i).p_variants, `page ${i + 1}`).toEqual(newAt(0).p_variants);
+        expect(newAt(i).p_folded, `page ${i + 1}`).toBe(newAt(0).p_folded);
+      }
+      expect(newAt(0).p_variants).toContain("imamoğlu");
+      expect(newAt(0).p_folded).toBe("imamoglu");
+      expect(fixture.newCalls.map((c) => (c as NewArgs).p_offset)).toEqual([0, 24, 48, 72]);
+      expect(fixture.newCalls.map((c) => (c as NewArgs).p_limit)).toEqual([24, 24, 24, 24]);
+    });
+
+    it("a root-sibling page 1 still reports typedFull when it was full, so its pager continues the same merged list", async () => {
+      fixture.newIds = ids(24);
+      fixture.data = rowsFor(ids(24));
+      const first = await searchClusters("elektrik zammı", 1, "yeni");
+      if (!first.ok) throw new Error("expected ok");
+      expect(first.typedFull).toBe(true);
+      expect(first.capped).toBe(true);
+      expect(first.newest).toBe(true);
+      expect(fixture.newCalls).toHaveLength(1);
     });
 
     it("a too-short query is no search in this order either: no call, no slot, no cache entry", async () => {
@@ -2828,6 +3003,31 @@ describe("searchClusters: the newest-first order (?sirala=yeni, h191)", () => {
       expect(result).not.toHaveProperty("newest");
       expect(fixture.newCalls).toHaveLength(1);
       expect(fixture.rpcCalls[0]).toEqual({ p_variants: ["ışık", "işik", "işık"], p_folded: "isik", p_limit: 24 });
+    });
+
+    it("a root-sibling query ('imamoğluna') falls back the same way: PGRST202 or a thrown error on page 1 is answered in the ranked order after ONE call to the new function", async () => {
+      fixture.newError = { message: "missing", code: "PGRST202" };
+      fixture.rpcIds = ["r1", "r2"];
+      fixture.data = rowsFor(["r1", "r2"]);
+      const missing = await searchClusters("imamoğluna", 1, "yeni");
+      if (!missing.ok) throw new Error("expected ok");
+      expect(missing.bundles.map((b) => b.cluster.id)).toEqual(["r1", "r2"]);
+      expect(missing).not.toHaveProperty("newest");
+      expect(fixture.newCalls).toHaveLength(1);
+      // The ranked page 1 made its own typed call, then its sibling call, exactly as it always does.
+      expect(fixture.rpcCalls).toHaveLength(2);
+      expect((fixture.rpcCalls[0] as { p_folded: string }).p_folded).toBe("imamogluna");
+      expect((fixture.rpcCalls[1] as { p_folded: string }).p_folded).toBe("imamoglu");
+
+      fixture.newError = null;
+      fixture.newThrows = true;
+      fixture.newCalls = [];
+      fixture.rpcCalls = [];
+      const thrown = await searchClusters("elektrik zammı", 1, "yeni");
+      if (!thrown.ok) throw new Error("expected ok");
+      expect(thrown).not.toHaveProperty("newest");
+      expect(fixture.newCalls).toHaveLength(1);
+      expect(fixture.rpcCalls.length).toBeGreaterThanOrEqual(1);
     });
 
     it("PGRST202 on page 3: the ranked page 3 answers (search_cluster_ids_v2 at offset 48)", async () => {
@@ -2959,5 +3159,200 @@ describe("searchClusters: the newest-first order (?sirala=yeni, h191)", () => {
       expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
       expect(cacheTag).toHaveBeenCalledWith("clusters-search");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h196-search-2: the stem-fold arm of the archive RPCs admits a row that names a negated word ('galatasaray
+// -fenerbahçe' listed headlines naming Fenerbahçe, 5 of 24, in both orders). A negated word of 5 letters or more is
+// re-checked against the row's own text (title_tr_neutral, title_tr, summary_tr: what search_tsv holds) in every read:
+// ranked page 1, a later page and the newest-first order. Nothing is added to the RPC arguments, no extra DB call is
+// made, and the drops are not counted as `dropped`, so `capped` and `typedFull` still read the RPC's id count.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters: a negated word is re-checked app-side (h196-search-2)", () => {
+  type RpcArgs = { p_variants: string[]; p_folded?: string; p_limit: number; p_offset?: number };
+  const Q = "galatasaray -fenerbahçe";
+  const ids = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+  const row = (id: string, title: string, extra: { neutral?: string | null; summary?: string } = {}) =>
+    mkRow({
+      id,
+      title_tr: title,
+      title_tr_neutral: extra.neutral ?? null,
+      summary_tr: extra.summary ?? "ozet",
+      members: [{ id: `a-${id}`, sourceId: "s1" }],
+    });
+  const idsOf = (result: Awaited<ReturnType<typeof searchClusters>>) => {
+    if (!result.ok) throw new Error("expected ok");
+    return result.bundles.map((b) => b.cluster.id);
+  };
+  // The four rows of the spec: a and d hold no negated word, b holds it in the title, c only in the summary.
+  const fourRows = () => [
+    row("a", "Galatasaray'da transfer gündemi"),
+    row("b", "Galatasaray-Fenerbahçe derbisinin VAR hakemi belli oldu"),
+    row("c", "Galatasaray Şampiyonlar Ligi'nde", { summary: "Rakip Fenerbahçe'nin fikstürü açıklandı." }),
+    row("d", "Galatasaray antrenmanı"),
+  ];
+
+  it("ranked page 1: the row that names the word in its title and the one that names it only in its summary are dropped; the RPC arguments are byte-identical and the embed still reads every id", async () => {
+    fixture.rpcIds = ["a", "b", "c", "d"];
+    fixture.data = fourRows();
+    const result = await searchClusters(Q);
+    expect(idsOf(result)).toEqual(["a", "d"]);
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants(Q), p_folded: "galatasaray -fenerbahce", p_limit: 24 },
+    ]);
+    expect((fixture.rpcCalls[0] as RpcArgs).p_variants[0]).toBe("galatasaray -fenerbahçe");
+    // No extra DB call and no narrower select: the embed reads all 4 ids, once.
+    expect((fixture.lastState as BuilderState).in).toEqual([{ col: "id", vals: ["a", "b", "c", "d"] }]);
+    expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads all three texts of search_tsv: the neutral title alone is enough, and a null neutral title never throws", async () => {
+    fixture.rpcIds = ["a", "b", "c"];
+    fixture.data = [
+      row("a", "Galatasaray'da transfer", { neutral: null }),
+      row("b", "Galatasaray'da transfer", { neutral: "Fenerbahçe ile Galatasaray karşılaştı" }),
+      row("c", "Galatasaray antrenmanı", { neutral: "Galatasaray antrenmanı" }),
+    ];
+    expect(idsOf(await searchClusters(Q))).toEqual(["a", "c"]);
+  });
+
+  it("an ASCII negation ('-fenerbahce') drops a Turkish headline, and every inflection of the word counts: Fenerbahçe'nin, Fenerbahçeli, FENERBAHÇE", async () => {
+    fixture.rpcIds = ["a", "b", "c", "d", "e"];
+    fixture.data = [
+      row("a", "Galatasaray ve Fenerbahçe'nin fikstürü"),
+      row("b", "Fenerbahçeli taraftarlar Galatasaray'ı bekliyor"),
+      row("c", "GALATASARAY - FENERBAHÇE DERBİSİ"),
+      row("d", "Galatasaray süperfenerbahçe tezahüratı"),
+      row("e", "Galatasaray bahçe maçı"),
+    ];
+    const result = await searchClusters("galatasaray -fenerbahce");
+    // 'süperfenerbahçe' and 'bahçe' are not word starts of 'fenerbahce': kept.
+    expect(idsOf(result)).toEqual(["d", "e"]);
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: turkishQueryVariants("galatasaray -fenerbahce"), p_folded: "galatasaray -fenerbahce", p_limit: 24 },
+    ]);
+  });
+
+  it("several negated words: a row that holds ANY of them is dropped", async () => {
+    fixture.rpcIds = ["a", "b", "c"];
+    fixture.data = [
+      row("a", "Galatasaray Fenerbahçe derbisi"),
+      row("b", "Galatasaray Beşiktaş derbisi"),
+      row("c", "Galatasaray Trabzonspor maçı"),
+    ];
+    expect(idsOf(await searchClusters("galatasaray -fenerbahçe -beşiktaş"))).toEqual(["c"]);
+  });
+
+  it("a full ranked page with 2 rows dropped: 22 bundles, capped stays true and typedFull stays true (they read the RPC's id count)", async () => {
+    const all = ids(24, "t");
+    fixture.rpcIds = all;
+    fixture.data = all.map((id, i) =>
+      row(id, i === 3 || i === 17 ? "Galatasaray-Fenerbahçe derbisi" : "Galatasaray transfer haberi"),
+    );
+    const result = await searchClusters(Q);
+    expect(idsOf(result)).toHaveLength(22);
+    expect(result.ok && result.capped).toBe(true);
+    expect(result.ok && result.typedFull).toBe(true);
+    // Page 2 of the same typed ranking is still offered: the typed call filled the page.
+    expect(fixture.rpcCalls).toHaveLength(1);
+  });
+
+  it("fewer than a full page with rows dropped: capped stays false (the id count was short), the pager is not offered", async () => {
+    fixture.rpcIds = ["a", "b", "c", "d"];
+    fixture.data = fourRows();
+    const result = await searchClusters(Q);
+    expect(result.ok && result.capped).toBe(false);
+    expect(result).not.toHaveProperty("typedFull");
+  });
+
+  it("every row dropped: { ok: true, bundles: [], capped: false }, never a throw", async () => {
+    fixture.rpcIds = ["b", "c"];
+    fixture.data = [fourRows()[1]!, fourRows()[2]!];
+    await expect(searchClusters(Q)).resolves.toEqual({ ok: true, bundles: [], capped: false });
+  });
+
+  it("a later ranked page (search_cluster_ids_v2) applies the same filter, with the RPC arguments unchanged", async () => {
+    fixture.v2Ids = ["a", "b", "c", "d"];
+    fixture.data = fourRows();
+    const result = await searchClusters(Q, 2);
+    expect(idsOf(result)).toEqual(["a", "d"]);
+    expect(fixture.v2Calls).toEqual([
+      { p_variants: turkishQueryVariants(Q), p_folded: "galatasaray -fenerbahce", p_limit: 24, p_offset: 24 },
+    ]);
+    expect((fixture.lastState as BuilderState).in).toEqual([{ col: "id", vals: ["a", "b", "c", "d"] }]);
+    expect(result.ok && result.capped).toBe(false);
+  });
+
+  it("the newest-first order applies the same filter on page 1 and on a later page, with the RPC arguments unchanged", async () => {
+    fixture.newIds = ["a", "b", "c", "d"];
+    fixture.data = fourRows();
+    const first = await searchClusters(Q, 1, "yeni");
+    const later = await searchClusters(Q, 3, "yeni");
+    expect(idsOf(first)).toEqual(["a", "d"]);
+    expect(idsOf(later)).toEqual(["a", "d"]);
+    expect(first.ok && first.newest).toBe(true);
+    expect(fixture.newCalls).toEqual([
+      { p_variants: turkishQueryVariants(Q), p_folded: "galatasaray -fenerbahce", p_limit: 24, p_offset: 0 },
+      { p_variants: turkishQueryVariants(Q), p_folded: "galatasaray -fenerbahce", p_limit: 24, p_offset: 48 },
+    ]);
+    expect(fixture.rpcCalls).toEqual([]);
+  });
+
+  it("a full newest page 1 with 2 rows dropped keeps capped and typedFull (the 'Sonraki sonuçlar' pager is unchanged)", async () => {
+    const all = ids(24, "n");
+    fixture.newIds = all;
+    fixture.data = all.map((id, i) =>
+      row(id, i === 0 || i === 23 ? "Fenerbahçe'ye Galatasaray darbesi" : "Galatasaray transfer haberi"),
+    );
+    const result = await searchClusters(Q, 1, "yeni");
+    expect(idsOf(result)).toHaveLength(22);
+    expect(result.ok && result.capped).toBe(true);
+    expect(result.ok && result.typedFull).toBe(true);
+    expect(result.ok && result.newest).toBe(true);
+  });
+
+  it("a newest-first request answered in the ranked order (the new function missing) is filtered by the ranked path too", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      fixture.newError = { message: "missing", code: "PGRST202" };
+      fixture.rpcIds = ["a", "b", "c", "d"];
+      fixture.data = fourRows();
+      const result = await searchClusters(Q, 1, "yeni");
+      expect(idsOf(result)).toEqual(["a", "d"]);
+      expect(result).not.toHaveProperty("newest");
+    } finally {
+      vi.mocked(console.warn).mockRestore();
+    }
+  });
+
+  it("a query with no negation keeps every row, whatever the rows hold", async () => {
+    fixture.rpcIds = ["a", "b", "c", "d"];
+    fixture.data = fourRows();
+    expect(idsOf(await searchClusters("galatasaray fenerbahçe"))).toEqual(["a", "b", "c", "d"]);
+    fixture.newIds = ["a", "b", "c", "d"];
+    expect(idsOf(await searchClusters("galatasaray fenerbahçe", 1, "yeni"))).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("a negation of 3 or 4 letters stays with the database: the rows are kept ('-abd' keeps ABD, '-zam' keeps zaman)", async () => {
+    fixture.rpcIds = ["a", "b"];
+    fixture.data = [row("a", "ABD ile İran görüşmesi"), row("b", "Emekli için zaman daralıyor")];
+    expect(idsOf(await searchClusters("iran -abd"))).toEqual(["a", "b"]);
+    expect(idsOf(await searchClusters("emekli -zam"))).toEqual(["a", "b"]);
+    expect(idsOf(await searchClusters("iran -özel"))).toEqual(["a", "b"]);
+  });
+
+  it("a phrase or a negated phrase is the database's business: a query with a double quote keeps every row", async () => {
+    fixture.rpcIds = ["a", "b"];
+    fixture.data = [row("a", "Fenerbahçe maçı"), row("b", "Ukrayna'dan açıklama")];
+    expect(idsOf(await searchClusters('iran -"israil saldırısı"'))).toEqual(["a", "b"]);
+    expect(idsOf(await searchClusters('"fenerbahçe" -ukrayna'))).toEqual(["a", "b"]);
+  });
+
+  it("the word is judged row by row: 'borsa -dolar' drops 'dolarlık' (a word start) and keeps the row that lacks the word", async () => {
+    fixture.rpcIds = ["a", "b"];
+    fixture.data = [row("a", "Borsa güne yükselişle başladı"), row("b", "Dolarlık tahvil ihracı")];
+    expect(idsOf(await searchClusters("borsa -dolar"))).toEqual(["a"]);
   });
 });

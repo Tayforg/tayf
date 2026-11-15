@@ -102,7 +102,8 @@ export function formatZoneLine(counts: Record<MediaDnaZone, number>): string {
  * When the zones add up to N or more there is nothing to qualify (a stale or
  * synthetic tally can exceed the member list): the bare count is kept. The
  * share surfaces (embed, rozet, OG pill) print a wire redistribution's head
- * through `wireSourceCountHead`, which names the votes in that case.
+ * through `wireSourceCountHead`, which names the votes in that case; so does the
+ * /takip route (h196-counts-2).
  */
 export function sourceCountHead(
   total: number,
@@ -115,7 +116,9 @@ export function sourceCountHead(
 
 /**
  * `sourceCountHead` for the share surfaces (embed percent legend, rozet badge,
- * OG pill; the embed's English-only legend keeps `sourceCountHead`): a wire
+ * OG pill; the embed's English-only legend keeps `sourceCountHead`) and the
+ * /takip route (`countHead`, which also keeps `sourceCountHead` for an
+ * all-English cluster, whose zone line carries no tally): a wire
  * redistribution counts its DISTINCT TEXTS (`total` is
  * wire.effectiveArticleCount) while every classified member still votes, so M
  * can exceed N ('3 kaynak' beside %50/%50, from 4 + 4 votes). When `isWire` and
@@ -124,8 +127,8 @@ export function sourceCountHead(
  * parenthesised one ('3 kaynak (2 sınıflandırılmış)'), so the embed's layout
  * budget holds. Every other case is `sourceCountHead`'s, byte for byte: a
  * non-wire cluster keeps its stale-tally rule, and so do the RSS, social,
- * takip, digest, blindspots-feed, card and weekly callers, which do not use
- * this helper.
+ * digest, blindspots-feed, card and weekly callers, which do not use this
+ * helper.
  */
 export function wireSourceCountHead(
   total: number,

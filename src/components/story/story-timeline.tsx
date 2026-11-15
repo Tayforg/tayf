@@ -29,7 +29,19 @@ const HOLLOW_BORDER: Record<MediaDnaZone, string> = {
  *
  * Rendered in page.tsx under the spectrum, before <OwnershipLine>.
  */
-export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
+export function StoryTimeline({
+  timeline,
+  unit = "kaynak",
+}: {
+  timeline: StoryTimelineData;
+  /**
+   * The noun of the "Tüm sıra (N …)" summary (h196-counts-1). "kaynak" for every
+   * cluster; page.tsx passes "haber" for a wire-redistribution cluster, whose rows
+   * are outlets that each reprinted one text and whose header already counts
+   * "N haber, M farklı metin" (the page's honest-count rule).
+   */
+  unit?: "kaynak" | "haber";
+}) {
   const { points, summary, zoneFirsts } = timeline;
   // `buildStoryTimeline` never returns fewer than 3 points. The axis runs over
   // ALL plotted points, so its end labels are the first and last of those.
@@ -103,7 +115,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
 
       <details className="group">
         <summary className="inline-flex min-h-[44px] cursor-pointer touch-manipulation list-none items-center text-[12px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground">
-          Tüm sıra ({points.length} kaynak)
+          Tüm sıra ({points.length} {unit})
         </summary>
         <ol className="space-y-0.5 border-l border-border/60 pl-3">
           {points.map((p) => {

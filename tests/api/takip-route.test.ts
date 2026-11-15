@@ -63,6 +63,8 @@ interface BundleOpts {
   title?: string;
   articleCount?: number;
   effectiveArticleCount?: number;
+  /** ClusterBundle.isWireRedistribution (politics-query.ts); omitted = the field is absent. */
+  isWireRedistribution?: boolean;
   isBlindspot?: unknown;
   biases?: string[];
   /** Per-source `kind`, aligned with `biases` by index; omitted = no kind (voting). */
@@ -104,6 +106,9 @@ function bundle(o: BundleOpts) {
     })),
     ...(o.effectiveArticleCount !== undefined
       ? { effectiveArticleCount: o.effectiveArticleCount }
+      : {}),
+    ...(o.isWireRedistribution !== undefined
+      ? { isWireRedistribution: o.isWireRedistribution }
       : {}),
   };
 }
@@ -1039,6 +1044,241 @@ describe("GET /api/takip -- countHead (all three paths)", () => {
       expect(it5.zoneLine).toBe("İktidar 0 · Bağımsız 0 · Muhalefet 0");
       expect(it5.countHead).toBe("3 kaynak (0 sınıflandırılmış)");
     });
+  });
+});
+
+// h196-counts-1/2: a wire-redistribution cluster counts its DISTINCT TEXTS
+// (effectiveArticleCount) while every classified member still votes, so the votes
+// can exceed the count: 22c3980a printed '7 kaynak' beside 'İktidar 11 · Bağımsız
+// 1 · Muhalefet 1' (13), while its own page says 'Spektrum 13 sınıflandırılmış
+// kaynaktan oluşturuldu'. #305 fixed the embed, the rozet and the OG pill with
+// wireSourceCountHead; /api/takip uses it too now. Every other item keeps the
+// string sourceCountHead gave it.
+describe("GET /api/takip -- wire redistribution count head (h196-counts-2)", () => {
+  type Bundle = ReturnType<typeof bundle>;
+  type Item = {
+    sourceCount: number;
+    zoneLine: string;
+    countHead: string;
+  };
+  const paths: Array<[string, string, (bundles: Bundle[]) => void]> = [
+    [
+      "q",
+      "?q=Guterres",
+      (bundles) => searchClustersMock.mockResolvedValue({ ok: true, bundles }),
+    ],
+    [
+      "konu",
+      "?konu=ekonomi",
+      (bundles) =>
+        getTopicClustersMock.mockResolvedValue({ bundles, hasMore: false, page: 1 }),
+    ],
+    [
+      "gundem",
+      "?gundem=deva",
+      (bundles) =>
+        getEntityHubMock.mockResolvedValue({ bundles, total: bundles.length, asOfMs: 1 }),
+    ],
+  ];
+
+  async function firstItem(search: string): Promise<Item> {
+    const res = await call(search);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Item[] };
+    expect(body.items).toHaveLength(1);
+    return body.items[0] as Item;
+  }
+
+  const biasesOf = (iktidar: number, bagimsiz: number, muhalefet: number) => [
+    ...Array<string>(iktidar).fill("pro_government"),
+    ...Array<string>(bagimsiz).fill("center"),
+    ...Array<string>(muhalefet).fill("opposition"),
+  ];
+
+  describe.each(paths)("%s path", (_name, search, serve) => {
+    it("(1) a wire bundle whose votes exceed its distinct-text count names the votes: '7 kaynak · 13 sınıflandırılmış' (the 22c3980a shape)", async () => {
+      serve([
+        bundle({
+          id: "22c3980a",
+          articleCount: 14,
+          effectiveArticleCount: 7,
+          isWireRedistribution: true,
+          biases: biasesOf(11, 1, 1),
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.sourceCount).toBe(7);
+      expect(item.zoneLine).toBe("İktidar 11 · Bağımsız 1 · Muhalefet 1");
+      expect(item.countHead).toBe("7 kaynak · 13 sınıflandırılmış");
+    });
+
+    it("(1b) the 532ee77c shape: 3 distinct texts, 4 + 4 + 0 votes -> '3 kaynak · 8 sınıflandırılmış'", async () => {
+      serve([
+        bundle({
+          id: "532ee77c",
+          articleCount: 9,
+          effectiveArticleCount: 3,
+          isWireRedistribution: true,
+          biases: biasesOf(4, 4, 0),
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.countHead).toBe("3 kaynak · 8 sınıflandırılmış");
+    });
+
+    it("(2) a wire bundle whose votes do not exceed the count keeps today's string: '5 kaynak (3 sınıflandırılmış)'", async () => {
+      serve([
+        bundle({
+          id: "w2",
+          articleCount: 8,
+          effectiveArticleCount: 5,
+          isWireRedistribution: true,
+          biases: [...biasesOf(2, 1, 0), "center", "center"],
+          kinds: ["outlet", "outlet", "outlet", "aggregator", "niche"],
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.sourceCount).toBe(5);
+      expect(item.zoneLine).toBe("İktidar 2 · Bağımsız 1 · Muhalefet 0");
+      expect(item.countHead).toBe("5 kaynak (3 sınıflandırılmış)");
+    });
+
+    it("a wire bundle whose votes equal the count keeps the bare count: '5 kaynak'", async () => {
+      serve([
+        bundle({
+          id: "w2b",
+          articleCount: 9,
+          effectiveArticleCount: 5,
+          isWireRedistribution: true,
+          biases: biasesOf(3, 1, 1),
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.countHead).toBe("5 kaynak");
+    });
+
+    it("(3) a non-wire bundle with 12 of 16 members voting reads '16 kaynak (12 sınıflandırılmış)'", async () => {
+      serve([
+        bundle({
+          id: "n3",
+          articleCount: 16,
+          isWireRedistribution: false,
+          biases: [...biasesOf(8, 2, 2), "center", "center", "center", "center"],
+          kinds: [
+            ...Array<string>(12).fill("outlet"),
+            "aggregator",
+            "aggregator",
+            "niche",
+            "niche",
+          ],
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.sourceCount).toBe(16);
+      expect(item.countHead).toBe("16 kaynak (12 sınıflandırılmış)");
+    });
+
+    it("(4) a non-wire bundle whose members all vote reads 'N kaynak'", async () => {
+      serve([
+        bundle({
+          id: "n4",
+          articleCount: 5,
+          isWireRedistribution: false,
+          biases: biasesOf(2, 2, 1),
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.countHead).toBe("5 kaynak");
+    });
+
+    it("a NON-wire bundle whose votes exceed the count (a stale tally) keeps the bare count, never the wire form", async () => {
+      serve([
+        bundle({
+          id: "n4b",
+          articleCount: 4,
+          effectiveArticleCount: 2,
+          isWireRedistribution: false,
+          biases: biasesOf(2, 1, 1),
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.countHead).toBe("2 kaynak");
+    });
+
+    it("(5) a bundle with no isWireRedistribution field (a cache entry from before it existed) is today's string", async () => {
+      serve([
+        bundle({
+          id: "n5",
+          articleCount: 4,
+          effectiveArticleCount: 2,
+          biases: biasesOf(2, 1, 1),
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.countHead).toBe("2 kaynak");
+    });
+
+    it("a wire bundle with a zero distinct-text count never prints the wire form", async () => {
+      serve([
+        bundle({
+          id: "w0",
+          articleCount: 3,
+          effectiveArticleCount: 0,
+          isWireRedistribution: true,
+          biases: biasesOf(2, 1, 0),
+        }),
+      ]);
+      const item = await firstItem(search);
+      expect(item.countHead).toBe("0 kaynak");
+    });
+  });
+
+  it("an all-English wire bundle keeps its string: its zone line is the 'not compared' note, so there is no tally to add up", async () => {
+    const EN_TITLE = "Turkish president Erdoğan, UN chief Guterres discuss regional, global issues at COP31";
+    searchClustersMock.mockResolvedValue({
+      ok: true,
+      bundles: [
+        bundle({
+          id: "en-wire",
+          title: EN_TITLE,
+          articleCount: 4,
+          effectiveArticleCount: 1,
+          isWireRedistribution: true,
+          biases: ["pro_government", "pro_government", "pro_government"],
+          names: ["Daily Sabah", "TRT World", "Hürriyet Daily News"],
+          articles: [{ title: EN_TITLE, source: 0 }],
+        }),
+      ],
+    });
+
+    const item = await firstItem("?q=Guterres");
+
+    expect(item.zoneLine).toBe(
+      "Yalnızca İngilizce kaynaklar · Türkçe haberlerle karşılaştırılmadı",
+    );
+    expect(item.countHead).toBe("1 kaynak");
+  });
+
+  it("changes only countHead: sourceCount, zoneLine and the key set are what they were", async () => {
+    searchClustersMock.mockResolvedValue({
+      ok: true,
+      bundles: [
+        bundle({
+          id: "keys",
+          articleCount: 14,
+          effectiveArticleCount: 7,
+          isWireRedistribution: true,
+          biases: biasesOf(11, 1, 1),
+        }),
+      ],
+    });
+
+    const res = await call("?q=Guterres");
+    const body = (await res.json()) as { items: Array<Record<string, unknown>> };
+
+    expect(Object.keys(body.items[0] ?? {}).sort()).toEqual(
+      ["countHead", "firstPublished", "id", "isBlindspot", "sourceCount", "title", "updatedAt", "zoneLine"].sort(),
+    );
   });
 });
 

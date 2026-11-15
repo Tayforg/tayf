@@ -128,6 +128,25 @@ describe("StoryTimeline — 'Tüm sıra' list", () => {
     expect(rows[0] ?? "").toContain(`<span class="sr-only">${ZONE_META.bagimsiz.label}</span>`);
   });
 
+  // h196-counts-1: a wire-redistribution cluster's rows are outlets that each
+  // reprinted one text, and the page's own header counts those as "haber", so the
+  // summary's noun is a prop. The default stays "kaynak" (every other caller).
+  it("names the rows 'kaynak' by default and when unit is 'kaynak'", () => {
+    const byDefault = renderToStaticMarkup(<StoryTimeline timeline={WITH_NON_VOTING} />);
+    const explicit = renderToStaticMarkup(<StoryTimeline timeline={WITH_NON_VOTING} unit="kaynak" />);
+    expect(byDefault).toContain("Tüm sıra (4 kaynak)");
+    expect(explicit).toBe(byDefault);
+  });
+
+  it("names the rows 'haber' when unit is 'haber', and changes nothing else", () => {
+    const kaynak = renderToStaticMarkup(<StoryTimeline timeline={WITH_NON_VOTING} />);
+    const haber = renderToStaticMarkup(<StoryTimeline timeline={WITH_NON_VOTING} unit="haber" />);
+    expect(haber).toContain("Tüm sıra (4 haber)");
+    expect(haber).not.toContain("Tüm sıra (4 kaynak)");
+    // Byte-identical apart from that one noun.
+    expect(haber.replace("Tüm sıra (4 haber)", "Tüm sıra (4 kaynak)")).toBe(kaynak);
+  });
+
   it("marks only non-voting rows with a visible '(toplayıcı / niş)' label", () => {
     const html = render(WITH_NON_VOTING);
     const rows = fullListRows(html);

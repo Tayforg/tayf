@@ -1804,7 +1804,7 @@ describe("getClusterDetail recall-matched zones (h106-blindspotbadges-1)", () =>
     expect(withFlag!.blindspotRecallVetoed).toBe(without!.blindspotRecallVetoed);
   });
 
-  it("still asks and reports for a vetoed cluster (its empty columns say 'sessizlik' too)", async () => {
+  it("still asks once for a vetoed AND flagged cluster, and reports every empty column (h196-blindspot-1: the veto's superset of Jev's ['muhalefet'])", async () => {
     setRow(true, [], { blindspot_recall_veto: true });
     recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["muhalefet"]]]));
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
@@ -1813,7 +1813,8 @@ describe("getClusterDetail recall-matched zones (h106-blindspotbadges-1)", () =>
 
       expect(result!.blindspotRecallVetoed).toBe(true);
       expect(result!.cluster.is_blindspot).toBe(false);
-      expect(result!.recallMatchedZones).toEqual(["muhalefet"]);
+      expect(recallMock.fetchRecallMatchedZones).toHaveBeenCalledTimes(1);
+      expect(result!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
     } finally {
       infoSpy.mockRestore();
     }
@@ -1835,6 +1836,263 @@ describe("getClusterDetail recall-matched zones (h106-blindspotbadges-1)", () =>
     const result = await getClusterDetail(ID);
 
     expect(JSON.parse(JSON.stringify(result)).recallMatchedZones).toEqual(["muhalefet"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h196-blindspot-1: a VETOED claim (migration 071) means the system itself found
+// a same-event headline from the silent side in another cluster. The page then
+// withdraws the "Kör nokta" ribbon, so it must not state that side's silence
+// flatly either: every EMPTY voting column that is not the dominant one gets the
+// "benzer haber başka kümede olabilir" qualifier (recallMatchedZones), without a
+// Jev read (the veto is the evidence) and without ever qualifying a column that
+// has headlines. Not-vetoed clusters (recount-withdrawn, pending, plain) are
+// unchanged.
+// ---------------------------------------------------------------------------
+
+describe("getClusterDetail vetoed claim qualifies every empty column (h196-blindspot-1)", () => {
+  const ID = "11111111-1111-4111-8111-111111111111";
+
+  /** Five voting İktidar outlets (the BLINDSPOT.minSources floor) plus anything extra. */
+  function setVetoedRow(
+    extraMembers: Array<ReturnType<typeof mkEmbeddedMember>> = [],
+    rowOverrides: Record<string, unknown> = {},
+  ) {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: { pro_government: 3, gov_leaning: 2 },
+          // Old enough that the feed delay is not what this test is about.
+          first_published: "2026-04-10T08:00:00Z",
+          blindspot_recall_veto: true,
+          blindspot_recall_suspect: false,
+          ...rowOverrides,
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "g1", "2026-04-17T10:00:00Z", { source: { bias: "pro_government" } }),
+          mkEmbeddedMember("a2", "g2", "2026-04-17T09:00:00Z", { source: { bias: "pro_government" } }),
+          mkEmbeddedMember("a3", "g3", "2026-04-17T08:30:00Z", { source: { bias: "pro_government" } }),
+          mkEmbeddedMember("a4", "g4", "2026-04-17T08:20:00Z", { source: { bias: "gov_leaning" } }),
+          mkEmbeddedMember("a5", "g5", "2026-04-17T08:10:00Z", { source: { bias: "gov_leaning" } }),
+          ...extraMembers,
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+  }
+
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    infoSpy.mockRestore();
+  });
+
+  it("(a) vetoed, not flagged, İktidar voters only: both silent columns are qualified, with no Jev read", async () => {
+    setVetoedRow();
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.blindspotRecallVetoed).toBe(true);
+    expect(result!.cluster.is_blindspot).toBe(false);
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
+    expect(recallMock.fetchRecallMatchedZones).not.toHaveBeenCalled();
+  });
+
+  it("(b) one voting Muhalefet member: that column has a headline and is never qualified", async () => {
+    setVetoedRow([
+      mkEmbeddedMember("a6", "m1", "2026-04-17T08:00:00Z", { source: { bias: "opposition" } }),
+    ]);
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz"]);
+    expect(recallMock.fetchRecallMatchedZones).not.toHaveBeenCalled();
+  });
+
+  it("a Muhalefet-dominant vetoed page qualifies İktidar and Bağımsız, in sorted order", async () => {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "opposition",
+          bias_distribution: { opposition: 5 },
+          first_published: "2026-04-10T08:00:00Z",
+          blindspot_recall_veto: true,
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = {
+      returns: {
+        data: ["a1", "a2", "a3", "a4", "a5"].map((a, i) =>
+          mkEmbeddedMember(a, `m${i}`, `2026-04-17T0${i}:00:00Z`, { source: { bias: "opposition" } }),
+        ),
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "iktidar"]);
+  });
+
+  it("a toplayıcı / niş member is not a voting member: its zone stays an empty column", async () => {
+    setVetoedRow([
+      mkEmbeddedMember("a6", "n1", "2026-04-17T08:00:00Z", { source: { bias: "opposition", kind: "niche" } }),
+    ]);
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("is computed on the de-duplicated voting members, one vote per source", async () => {
+    // A second article of the same Muhalefet source still leaves ONE voting member there.
+    setVetoedRow([
+      mkEmbeddedMember("a6", "m1", "2026-04-17T08:00:00Z", { source: { bias: "opposition" } }),
+      mkEmbeddedMember("a6b", "m1", "2026-04-17T08:30:00Z", { source: { bias: "opposition" } }),
+    ]);
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz"]);
+  });
+
+  it("(c) vetoed AND flagged: still exactly one Jev read, and the result is the superset of Jev's answer", async () => {
+    setVetoedRow([], { blindspot_recall_suspect: true });
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map([[ID, ["muhalefet"]]]));
+
+    const result = await getClusterDetail(ID);
+
+    expect(recallMock.fetchRecallMatchedZones).toHaveBeenCalledTimes(1);
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("(c) vetoed AND flagged with a failed Jev lookup still qualifies the empty columns (the veto is the evidence)", async () => {
+    setVetoedRow([], { blindspot_recall_suspect: true });
+    recallMock.fetchRecallMatchedZones.mockResolvedValue(new Map());
+
+    const result = await getClusterDetail(ID);
+
+    expect(recallMock.fetchRecallMatchedZones).toHaveBeenCalledTimes(1);
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("(d) a claim that is not vetoed (veto false, null or absent) stays []", async () => {
+    for (const veto of [false, null, undefined]) {
+      __resetCacheResilienceForTests();
+      setVetoedRow([], veto === undefined ? { blindspot_recall_veto: undefined } : { blindspot_recall_veto: veto });
+
+      const result = await getClusterDetail(ID);
+
+      expect(result!.blindspotRecallVetoed).toBe(false);
+      expect(result!.recallMatchedZones).toEqual([]);
+    }
+    expect(recallMock.fetchRecallMatchedZones).not.toHaveBeenCalled();
+  });
+
+  it("(d) the veto flag on a row that never made a claim vetoes nothing: stays []", async () => {
+    // applyRecallVeto only withdraws a REAL claim (is_blindspot true).
+    setVetoedRow([], { is_blindspot: false, blindspot_side: null });
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.blindspotRecallVetoed).toBe(false);
+    expect(result!.recallMatchedZones).toEqual([]);
+  });
+
+  it("(e) a recount-withdrawn claim (h63: stored flag fails the voting recount) is not a veto: stays []", async () => {
+    // 5 İktidar + 3 Muhalefet voters: top share 5/8 < BLINDSPOT.dominantShare (0.8).
+    setVetoedRow(
+      ["m1", "m2", "m3"].map((s, i) =>
+        mkEmbeddedMember(`b${i}`, s, `2026-04-17T07:0${i}:00Z`, { source: { bias: "opposition" } }),
+      ),
+      { blindspot_recall_veto: false },
+    );
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.cluster.is_blindspot).toBe(false);
+    expect(result!.blindspotRecallVetoed).toBe(false);
+    expect(result!.recallMatchedZones).toEqual([]);
+  });
+
+  it("(e) a pending claim (first published < 24 h ago) is not a veto: stays []", async () => {
+    setVetoedRow([], {
+      blindspot_recall_veto: false,
+      first_published: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.cluster.is_blindspot).toBe(false);
+    expect(result!.blindspotRecallVetoed).toBe(false);
+    expect(result!.recallMatchedZones).toEqual([]);
+  });
+
+  it("a vetoed young cluster still outranks the delay: it is vetoed, so its empty columns are qualified", async () => {
+    setVetoedRow([], { first_published: new Date(Date.now() - 60 * 60 * 1000).toISOString() });
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.blindspotRecallVetoed).toBe(true);
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
+  });
+
+  it("a vetoed cluster with no voting member has no dominant zone: every column is empty (moot: the page draws no framing block)", async () => {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: { pro_government: 5 },
+          blindspot_recall_veto: true,
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = {
+      returns: {
+        data: [mkEmbeddedMember("a1", "n1", "2026-04-17T10:00:00Z", { source: { bias: "opposition", kind: "niche" } })],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail(ID);
+
+    expect(result!.recallMatchedZones).toEqual(["bagimsiz", "iktidar", "muhalefet"]);
+  });
+
+  it("changes only the wording field: the claim, the veto, the members and the counts are the same as without the veto qualifier", async () => {
+    setVetoedRow();
+    const vetoed = await getClusterDetail(ID);
+
+    expect(vetoed!.cluster.is_blindspot).toBe(false);
+    expect(vetoed!.cluster.blindspot_side).toBeNull();
+    expect(vetoed!.blindspotSuppressed).toBe(false);
+    expect(vetoed!.members).toHaveLength(5);
+    // The veto stays a matching fact, not a feed outage.
+    expect(feedHealthMock.getZoneFeedHealth).not.toHaveBeenCalled();
+  });
+
+  it("(f) the reported zones are a plain array that survives the cache payload", async () => {
+    setVetoedRow();
+
+    const result = await getClusterDetail(ID);
+
+    expect(JSON.parse(JSON.stringify(result)).recallMatchedZones).toEqual(["bagimsiz", "muhalefet"]);
   });
 });
 

@@ -2608,6 +2608,78 @@ describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
     expect(collectText(tree).join("")).not.toMatch(/yazmad/);
   });
 
+  // h196-counts-1: the header says "7 kaynak" and the wire badge counts "14 haber,
+  // 7 farklı metin" on a wire-redistribution cluster; the timeline's "Tüm sıra"
+  // summary used to say "(14 kaynak)" for the same 14 reprints. The page now hands
+  // the timeline the word the badge already uses; every other cluster is unchanged.
+  describe("the 'Tüm sıra' noun follows the page's honest-count rule (h196-counts-1)", () => {
+    const threeVoters = () => [
+      makeMember("a-sabah", sabah, "2026-09-27T06:12:00.000Z"),
+      makeMember("a-karar", karar, "2026-09-27T06:40:00.000Z"),
+      makeMember("a-sozcu", sozcu, "2026-09-27T08:22:00.000Z"),
+    ];
+
+    async function timelineHtml(d: ClusterDetail) {
+      getClusterDetail.mockResolvedValue(d);
+      const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+      const el = findElementOfType(tree, StoryTimeline);
+      expect(el).not.toBeNull();
+      return {
+        tree,
+        unit: el!.props.unit,
+        html: renderToStaticMarkup(el as unknown as Parameters<typeof renderToStaticMarkup>[0]),
+      };
+    }
+
+    it("a wire-redistribution cluster counts the rows as 'haber', next to the wire badge's own count", async () => {
+      const wire = {
+        ...detailFor(threeVoters()),
+        wire: { isWireRedistribution: true, effectiveArticleCount: 2, memberCount: 3 },
+      };
+
+      const { tree, unit, html } = await timelineHtml(wire);
+
+      expect(unit).toBe("haber");
+      expect(html).toContain("Tüm sıra (3 haber)");
+      expect(html).not.toContain("Tüm sıra (3 kaynak)");
+      // The header on the same page: the distinct-text count, then the badge in "haber".
+      const text = collectText(tree).join("");
+      expect(text).toContain("2 kaynak");
+      expect(text).toContain("Ajans ağırlıklı · 3 haber, 2 farklı metin");
+    });
+
+    it("a wire cluster whose timeline also plots a non-voting source counts every plotted row", async () => {
+      const wire = {
+        ...detailFor([...threeVoters(), makeMember("a-agg", aggregator, "2026-09-27T06:00:00.000Z")]),
+        wire: { isWireRedistribution: true, effectiveArticleCount: 2, memberCount: 4 },
+      };
+
+      const { html } = await timelineHtml(wire);
+
+      expect(html).toContain("Tüm sıra (4 haber)");
+    });
+
+    it("a non-wire cluster still counts the rows as 'kaynak'", async () => {
+      const { unit, html } = await timelineHtml(detailFor(threeVoters()));
+
+      expect(unit).toBe("kaynak");
+      expect(html).toContain("Tüm sıra (3 kaynak)");
+      expect(html).not.toContain("Tüm sıra (3 haber)");
+    });
+
+    it("a wire block with isWireRedistribution false (a count mismatch alone) is not a wire cluster", async () => {
+      const notWire = {
+        ...detailFor(threeVoters()),
+        wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 3 },
+      };
+
+      const { unit, html } = await timelineHtml(notWire);
+
+      expect(unit).toBe("kaynak");
+      expect(html).toContain("Tüm sıra (3 kaynak)");
+    });
+  });
+
   it("skips the feed-health lookup when every zone has a member", async () => {
     getClusterDetail.mockResolvedValue(
       detailFor([
@@ -5565,6 +5637,45 @@ describe("ClusterDetailPage — share text, read-across and timeline, zones Jev 
     expect(old.readAcrossHtml).not.toContain("benzer haber");
     expect(old.summary).not.toContain("benzer haber");
     expect((old.readAcross!.props.recallMatchedZones as Set<string>).size).toBe(0);
+  });
+
+  // h196-blindspot-1: a cluster whose claim the recall veto withdrew (no ribbon)
+  // gets every empty column qualified by the detail query, so the page that
+  // withdrew the claim does not state that side's silence flatly.
+  it("a vetoed cluster (no ribbon) reads 'benzer haber başka kümede olabilir' on the read-across line and in both empty columns (h196-blindspot-1)", async () => {
+    const base = detailWith(outlets, ["bagimsiz", "muhalefet"]);
+    const vetoed: ClusterDetail = {
+      ...base,
+      cluster: { ...base.cluster, is_blindspot: false, blindspot_side: null },
+      blindspotRecallVetoed: true,
+    };
+
+    const { tree, readAcrossHtml } = await render(vetoed);
+
+    expect(readAcrossHtml).toContain(`Muhalefet tarafında henüz haber yok · ${NOTE}`);
+    const framing = renderToStaticMarkup(
+      findElementOfType(tree, FramingComparison) as unknown as ReactElement,
+    );
+    expect(framing.split("— bu kümede yok · " + NOTE + " —")).toHaveLength(3);
+    expect(framing).not.toContain("sessizlik");
+  });
+
+  it("a non-vetoed, non-blindspot cluster with no zones keeps the flat wording (control for h196-blindspot-1)", async () => {
+    const base = detailWith(outlets, []);
+    const plain: ClusterDetail = {
+      ...base,
+      cluster: { ...base.cluster, is_blindspot: false, blindspot_side: null },
+    };
+
+    const { tree, readAcrossHtml } = await render(plain);
+
+    expect(readAcrossHtml).toContain("Muhalefet tarafında henüz haber yok");
+    expect(readAcrossHtml).not.toContain(NOTE);
+    const framing = renderToStaticMarkup(
+      findElementOfType(tree, FramingComparison) as unknown as ReactElement,
+    );
+    expect(framing.split("— bu tarafta sessizlik —")).toHaveLength(3);
+    expect(framing).not.toContain(NOTE);
   });
 
   it("a toplayıcı / niş source from another zone keeps 'spektrumda sadece' over 'kümede sadece'", async () => {
