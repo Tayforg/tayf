@@ -132,6 +132,66 @@ async function seedShell(w: LoadedWorker, cachedAt = iso(0)) {
   );
 }
 
+const OFFLINE_KEY = `${ORIGIN}/offline`;
+const SHELL_MAX_AGE = policy.SW_CONFIG.shellMaxAgeMs;
+const SHELL_RETRY = policy.SW_CONFIG.shellRetryMs;
+
+/** The cached-at stamp of the stored /offline shell (null when there is no shell). */
+async function shellStamp(w: LoadedWorker): Promise<string | null> {
+  return (await w.caches.headers(CACHE_NAMES.shell, OFFLINE_KEY))?.get(HEADER_CACHED_AT) ?? null;
+}
+
+/**
+ * A shell that is missing assets is only trusted for shellRetryMs: not expired up to shellRetryMs after the
+ * precache, expired right after. t0 / t1 bracket the precache on the host clock (the worker's vm shares the
+ * real clock), so the bounds hold without sleeping.
+ */
+function expectRetryStamp(stamp: string | null, t0: number, t1: number) {
+  expect(stamp).toBeTruthy();
+  expect(policy.isExpired(stamp, t0, SHELL_MAX_AGE)).toBe(false);
+  expect(policy.isExpired(stamp, t0 + SHELL_RETRY - 1000, SHELL_MAX_AGE)).toBe(false);
+  expect(policy.isExpired(stamp, t1 + SHELL_RETRY + 1000, SHELL_MAX_AGE)).toBe(true);
+}
+
+/** A complete shell is trusted for shellMaxAgeMs: not expired just before, expired just after. */
+function expectFullStamp(stamp: string | null, t0: number, t1: number) {
+  expect(stamp).toBeTruthy();
+  expect(policy.isExpired(stamp, t0 + SHELL_MAX_AGE - 1000, SHELL_MAX_AGE)).toBe(false);
+  expect(policy.isExpired(stamp, t1 + SHELL_MAX_AGE + 1000, SHELL_MAX_AGE)).toBe(true);
+}
+
+/**
+ * Lets `ms` pass for the shell stamp. The worker runs on the real clock inside its vm, so instead of faking
+ * timers the stored stamp is moved back: precacheShell and syncSaved read the clock only through this stamp.
+ */
+async function ageShellStamp(w: LoadedWorker, ms: number) {
+  const stamp = await shellStamp(w);
+  const body = await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY);
+  expect(stamp).toBeTruthy();
+  expect(body).not.toBeNull();
+  await w.caches.seed(
+    CACHE_NAMES.shell,
+    OFFLINE_KEY,
+    stored(body ?? "", { [HEADER_CACHED_AT]: new Date(Date.parse(stamp ?? "") - ms).toISOString() }),
+  );
+}
+
+/**
+ * shellAwareFetch where the urls in `failing` throw (a dropped connection) and the urls in `noStore` answer with
+ * Cache-Control no-store (a static asset the worker refuses to store). Both sets may change between calls.
+ */
+function failingAssets(failing: Set<string>, noStore: Set<string> = new Set()): FetchImpl {
+  const base = shellAwareFetch();
+  return async (input, init) => {
+    const url = urlString(input);
+    if (failing.has(url)) throw new TypeError("asset offline");
+    if (noStore.has(url)) {
+      return fakeResponse("x", { url, headers: { "content-type": "text/css", "cache-control": "no-store" } });
+    }
+    return base(input, init);
+  };
+}
+
 async function bodyOf(res: Response | null | undefined): Promise<string> {
   expect(res).toBeTruthy();
   return (res as Response).text();
@@ -1280,9 +1340,13 @@ describe("install", () => {
       }
       return base(input, init);
     });
+    const t0 = Date.now();
     await w.dispatchInstall();
+    const t1 = Date.now();
     expect(w.caches.urls(CACHE_NAMES.shell)).toEqual([`${ORIGIN}/offline`]);
     expect(w.skipWaiting).toHaveBeenCalledTimes(1);
+    // h183-pwa-1: a shell that is missing assets is not locked in for shellMaxAgeMs, sync retries after shellRetryMs.
+    expectRetryStamp(await shellStamp(w), t0, t1);
   });
 
   it("drops shell keys that are not in the new set, keeps the new ones", async () => {
@@ -1291,6 +1355,380 @@ describe("install", () => {
     await w.dispatchInstall();
     expect(w.caches.urls(CACHE_NAMES.shell)).not.toContain(`${ORIGIN}/_next/static/chunks/old.js`);
     expect(w.caches.urls(CACHE_NAMES.shell)).toContain(ASSET_A);
+  });
+});
+
+// h183-pwa-1: precacheShell used to ignore a failed asset download, stamp /offline fresh for shellMaxAgeMs and prune
+// everything outside the new asset set. A partly cached shell was then locked in for a week (the /offline-only
+// list chunk could stay missing), and a refresh with one failed download replaced a working shell by a broken one.
+// Now a shell with missing assets gets a short retry stamp and never replaces a previous shell. h184: it prunes only
+// what neither the stored (previous) html nor the new html names, so repeated partial refreshes stay bounded.
+describe("shell precache when an asset download fails", () => {
+  const OLD_A = `${ORIGIN}/_next/static/chunks/old-a.js`;
+  const OLD_B = `${ORIGIN}/_next/static/chunks/old-b.js`;
+  // The html an earlier install stored: it names both old assets, which is what keeps them on a partial refresh.
+  const OLD_HTML = [
+    "<!doctype html><title>old offline</title>",
+    '<script src="/_next/static/chunks/old-a.js" async></script>',
+    '<script src="/_next/static/chunks/old-b.js" async></script>',
+  ].join("");
+  const sync = (w: LoadedWorker) => w.dispatchMessage({ type: "tayf:sync", ids: [] });
+  const fetchedUrls = (w: LoadedWorker) => w.fetch.mock.calls.map((c) => urlString(c[0]));
+  const shellDeletes = (w: LoadedWorker) =>
+    w.caches.writes().filter((op) => op.cache === CACHE_NAMES.shell && op.op === "delete");
+
+  /** A complete shell as an earlier install left it: html plus two assets, stamped `cachedAt`. */
+  async function seedOldShell(w: LoadedWorker, cachedAt: string) {
+    await w.caches.seed(CACHE_NAMES.shell, OFFLINE_KEY, stored(OLD_HTML, { [HEADER_CACHED_AT]: cachedAt }));
+    await w.caches.seed(CACHE_NAMES.shell, OLD_A, fakeResponse("old-a"));
+    await w.caches.seed(CACHE_NAMES.shell, OLD_B, fakeResponse("old-b"));
+  }
+
+  it("a fully successful install stamps the shell for shellMaxAgeMs", async () => {
+    const w = load(shellAwareFetch());
+    const t0 = Date.now();
+    await w.dispatchInstall();
+    const t1 = Date.now();
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_A, ASSET_B, OFFLINE_KEY].sort());
+    expectFullStamp(await shellStamp(w), t0, t1);
+  });
+
+  it("a partial install heals on the next sync after shellRetryMs, and not before", async () => {
+    const failing = new Set([ASSET_A]);
+    const w = load(failingAssets(failing));
+    await w.dispatchInstall();
+    expect(w.skipWaiting).toHaveBeenCalledTimes(1);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_B, OFFLINE_KEY].sort());
+
+    // The connection recovers, but the retry window has not elapsed yet: sync leaves the shell alone.
+    failing.clear();
+    await ageShellStamp(w, SHELL_RETRY - 60_000);
+    w.fetch.mockClear();
+    await sync(w);
+    expect(w.fetch).not.toHaveBeenCalled();
+    expect(w.caches.urls(CACHE_NAMES.shell)).not.toContain(ASSET_A);
+
+    // shellRetryMs (+ 1 s) after the install: sync refetches /offline and completes the shell.
+    await ageShellStamp(w, 60_000 + 1000);
+    const t0 = Date.now();
+    await sync(w);
+    const t1 = Date.now();
+    expect(fetchedUrls(w)).toContain(OFFLINE_KEY);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_A, ASSET_B, OFFLINE_KEY].sort());
+    expectFullStamp(await shellStamp(w), t0, t1);
+  });
+
+  it("a partial install without a previous /offline puts the html with a retry stamp and keeps only the new html's assets", async () => {
+    const w = load(failingAssets(new Set([ASSET_A])));
+    await w.caches.seed(CACHE_NAMES.shell, OLD_A, fakeResponse("old-a")); // named by no stored html
+    const t0 = Date.now();
+    await w.dispatchInstall();
+    const t1 = Date.now();
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OFFLINE_HTML);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_B, OFFLINE_KEY].sort());
+    expect(shellDeletes(w).map((op) => op.url)).toEqual([OLD_A]);
+    expectRetryStamp(await shellStamp(w), t0, t1);
+  });
+
+  it.each([
+    ["one asset throws", new Set([ASSET_A]), new Set<string>(), [ASSET_B]],
+    ["one asset is not cacheable (no-store)", new Set<string>(), new Set([ASSET_B]), [ASSET_A]],
+    ["every asset fails", new Set([ASSET_A]), new Set([ASSET_B]), []],
+  ])("a partial refresh keeps the previous complete shell: %s", async (_n, failing, noStore, downloaded) => {
+    const w = load(failingAssets(failing, noStore));
+    await seedOldShell(w, iso(SHELL_MAX_AGE + HOUR));
+    const t0 = Date.now();
+    await sync(w);
+    const t1 = Date.now();
+
+    expect(fetchedUrls(w)).toContain(OFFLINE_KEY); // the refresh did run
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OLD_HTML);
+    expect((await w.caches.headers(CACHE_NAMES.shell, OFFLINE_KEY))?.get("content-type")).toBe("text/html; charset=utf-8");
+    // Nothing pruned: the previous html names both old assets so they stay, and the downloaded assets stay next to them.
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([OFFLINE_KEY, OLD_A, OLD_B, ...downloaded].sort());
+    expect(shellDeletes(w)).toEqual([]);
+    expectRetryStamp(await shellStamp(w), t0, t1);
+  });
+
+  it("an install over a previous shell (a worker update) keeps it when an asset fails and shortens its stamp", async () => {
+    const w = load(failingAssets(new Set([ASSET_A])));
+    await seedOldShell(w, iso(0)); // an old worker's partial shell, stamped fresh for shellMaxAgeMs
+    const t0 = Date.now();
+    await w.dispatchInstall();
+    const t1 = Date.now();
+    expect(w.skipWaiting).toHaveBeenCalledTimes(1);
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OLD_HTML);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_B, OFFLINE_KEY, OLD_A, OLD_B].sort());
+    expect(shellDeletes(w)).toEqual([]);
+    expectRetryStamp(await shellStamp(w), t0, t1);
+  });
+
+  it("a successful refresh still replaces the html and prunes old assets", async () => {
+    const w = load(shellAwareFetch());
+    await seedOldShell(w, iso(SHELL_MAX_AGE + HOUR));
+    const t0 = Date.now();
+    await sync(w);
+    const t1 = Date.now();
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OFFLINE_HTML);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_A, ASSET_B, OFFLINE_KEY].sort());
+    expectFullStamp(await shellStamp(w), t0, t1);
+  });
+
+  // Two precacheShell runs can overlap (two tabs posting tayf:sync, or a sync during install). The partial run must
+  // not re-put the html it read before its downloads started, or it would overwrite what a finished run stored.
+  it("a concurrent successful refresh is not overwritten by a late partial run", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const base = shellAwareFetch();
+    const w = load(async (input, init) => {
+      if (urlString(input) === ASSET_A) {
+        await gate;
+        throw new TypeError("asset offline");
+      }
+      return base(input, init);
+    });
+    await seedOldShell(w, iso(SHELL_MAX_AGE + HOUR));
+    const t0 = Date.now();
+    const run = sync(w);
+    await vi.waitFor(() => expect(fetchedUrls(w)).toContain(ASSET_A));
+
+    // Meanwhile another run completed: it stored the new html with a full stamp.
+    await w.caches.seed(CACHE_NAMES.shell, OFFLINE_KEY, stored("new-offline", { [HEADER_CACHED_AT]: iso(0) }));
+    release();
+    await run;
+    const t1 = Date.now();
+
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe("new-offline");
+    expectRetryStamp(await shellStamp(w), t0, t1);
+  });
+
+  it("a failing /offline fetch leaves the previous shell untouched", async () => {
+    const w = load(async () => {
+      throw new TypeError("offline");
+    });
+    await seedOldShell(w, iso(SHELL_MAX_AGE + HOUR));
+    const stampBefore = await shellStamp(w);
+    await sync(w);
+    expect(fetchedUrls(w)).toContain(OFFLINE_KEY); // the refresh was attempted
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OLD_HTML);
+    expect(await shellStamp(w)).toBe(stampBefore);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([OFFLINE_KEY, OLD_A, OLD_B].sort());
+  });
+});
+
+// A partial refresh used to prune the shell cache down to the new html's asset set, discarding the assets of the
+// previous complete shell that /offline still needs. It now keeps the previous shell and prunes every key that is in
+// neither the asset set of the html stored as /offline (the previous shell, or the new html on a first install) nor
+// the asset set of the new html: at most two deploys' assets stay while one asset keeps failing.
+describe("shell cache stays bounded when an asset keeps failing (h184)", () => {
+  const PER_DEPLOY = 6;
+  const FAILING_INDEX = 3;
+  const sync = (w: LoadedWorker) => w.dispatchMessage({ type: "tayf:sync", ids: [] });
+  const offlineFetches = (w: LoadedWorker) => w.fetch.mock.calls.filter((c) => urlString(c[0]) === OFFLINE_KEY).length;
+  const shellDeletes = (w: LoadedWorker) =>
+    w.caches.writes().filter((op) => op.cache === CACHE_NAMES.shell && op.op === "delete");
+  const chunk = (deploy: number, i: number) => `${ORIGIN}/_next/static/chunks/d${deploy}-a${i}.js`;
+  const deployAssets = (deploy: number) => Array.from({ length: PER_DEPLOY }, (_, i) => chunk(deploy, i));
+  /** The assets of a deploy that can be downloaded while its FAILING_INDEX asset is blocked. */
+  const reachable = (deploy: number) => deployAssets(deploy).filter((_, i) => i !== FAILING_INDEX);
+  const deployHtml = (deploy: number) =>
+    "<!doctype html><title>d" +
+    deploy +
+    "</title>" +
+    deployAssets(deploy)
+      .map((u) => '<script src="' + u.slice(ORIGIN.length) + '" async></script>')
+      .join("");
+
+  interface DeployState {
+    deploy: number;
+    blocked: Set<string>;
+  }
+
+  /** /offline answers the html of state.deploy, every blocked url throws, every other static asset answers. */
+  function deployFetch(state: DeployState): FetchImpl {
+    return async (input) => {
+      const url = urlString(input);
+      if (url === OFFLINE_KEY) {
+        return fakeResponse(deployHtml(state.deploy), {
+          url,
+          headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": CSP, "cache-control": NO_STORE },
+        });
+      }
+      if (state.blocked.has(url)) throw new TypeError("asset blocked");
+      if (url.startsWith(`${ORIGIN}/_next/static/`)) {
+        return fakeResponse("asset:" + url, {
+          url,
+          headers: { "content-type": "text/css", "cache-control": "public, max-age=31536000, immutable" },
+        });
+      }
+      throw new TypeError("unexpected fetch " + url);
+    };
+  }
+
+  /** Ships deploy `d`: its html answers /offline and one of its assets is blocked (a per-user block). */
+  function ship(state: DeployState, d: number) {
+    state.deploy = d;
+    state.blocked = new Set([chunk(d, FAILING_INDEX)]);
+  }
+
+  /** Lets the shell stamp run out (a partial shell is retried after shellRetryMs): the next sync refreshes it. */
+  async function expireShell(w: LoadedWorker) {
+    await ageShellStamp(w, SHELL_MAX_AGE + HOUR);
+  }
+
+  /** A complete shell of `deploy` as an earlier install left it, stamped expired. */
+  async function seedDeployShell(w: LoadedWorker, deploy: number) {
+    await w.caches.seed(
+      CACHE_NAMES.shell,
+      OFFLINE_KEY,
+      stored(deployHtml(deploy), { [HEADER_CACHED_AT]: iso(SHELL_MAX_AGE + HOUR) }),
+    );
+    for (const url of deployAssets(deploy)) await w.caches.seed(CACHE_NAMES.shell, url, fakeResponse("prev:" + url));
+  }
+
+  it("keeps the entry count bounded across 40 deploys while one asset of every deploy keeps failing", async () => {
+    const DEPLOYS = 40;
+    const state: DeployState = { deploy: 1, blocked: new Set() };
+    ship(state, 1);
+    const w = load(deployFetch(state));
+    await w.dispatchInstall(); // first install: partial, the html of deploy 1 is stored
+    const bound = 2 * PER_DEPLOY + 1; // two deploys' assets plus /offline
+    expect(w.caches.urls(CACHE_NAMES.shell).length).toBeLessThanOrEqual(bound);
+
+    let peak = 0;
+    for (let d = 2; d <= DEPLOYS; d++) {
+      ship(state, d);
+      await expireShell(w);
+      await sync(w);
+      const urls = w.caches.urls(CACHE_NAMES.shell);
+      peak = Math.max(peak, urls.length);
+      expect(urls.length).toBeLessThanOrEqual(bound);
+      // Exactly the previous shell (deploy 1, still the stored html) plus what deploy d managed to download.
+      expect(urls.slice().sort()).toEqual([OFFLINE_KEY, ...reachable(1), ...reachable(d)].sort());
+    }
+    expect(peak).toBeLessThanOrEqual(bound);
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(deployHtml(1));
+  });
+
+  it("is also bounded by shellMaxAssets: at most two capped asset sets plus /offline", async () => {
+    const CAP = 3;
+    const state: DeployState = { deploy: 1, blocked: new Set() };
+    const shipCapped = (d: number) => {
+      state.deploy = d;
+      state.blocked = new Set([chunk(d, 1)]); // inside the first CAP assets, so the refresh is partial
+    };
+    shipCapped(1);
+    const w = load(deployFetch(state), { shellMaxAssets: CAP });
+    await w.dispatchInstall();
+    for (let d = 2; d <= 12; d++) {
+      shipCapped(d);
+      await expireShell(w);
+      await sync(w);
+      const urls = w.caches.urls(CACHE_NAMES.shell);
+      expect(urls.length).toBeLessThanOrEqual(2 * CAP + 1);
+      expect(urls.slice().sort()).toEqual([OFFLINE_KEY, chunk(1, 0), chunk(1, 2), chunk(d, 0), chunk(d, 2)].sort());
+    }
+  });
+
+  it("never deletes an asset of the previous shell on a partial refresh", async () => {
+    const state: DeployState = { deploy: 2, blocked: new Set() };
+    const w = load(deployFetch(state));
+    await seedDeployShell(w, 1);
+    for (let d = 2; d <= 8; d++) {
+      ship(state, d);
+      await expireShell(w);
+      const fetchesBefore = offlineFetches(w);
+      const t0 = Date.now();
+      await sync(w);
+      const t1 = Date.now();
+      expect(offlineFetches(w)).toBe(fetchesBefore + 1); // the refresh ran
+      expectRetryStamp(await shellStamp(w), t0, t1); // and took the partial path
+      const urls = w.caches.urls(CACHE_NAMES.shell);
+      for (const asset of deployAssets(1)) expect(urls).toContain(asset);
+      // The previous shell is still the stored one and still complete, so it keeps working offline.
+      expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(deployHtml(1));
+    }
+    const deleted = shellDeletes(w).map((op) => op.url);
+    for (const asset of deployAssets(1)) expect(deleted).not.toContain(asset);
+    expect(deleted).not.toContain(OFFLINE_KEY);
+  });
+
+  it("keeps the new deploy's downloaded assets, and drops what neither shell names, after /offline is re-put", async () => {
+    const ORPHAN = chunk(0, 0); // left by a deploy older than the previous shell
+    const state: DeployState = { deploy: 2, blocked: new Set() };
+    ship(state, 2);
+    const w = load(deployFetch(state));
+    await seedDeployShell(w, 1);
+    await w.caches.seed(CACHE_NAMES.shell, ORPHAN, fakeResponse("orphan"));
+    w.caches.clearLog();
+    const t0 = Date.now();
+    await sync(w);
+    const t1 = Date.now();
+
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([OFFLINE_KEY, ...deployAssets(1), ...reachable(2)].sort());
+    expect(w.caches.urls(CACHE_NAMES.shell)).not.toContain(chunk(2, FAILING_INDEX)); // never downloaded, never stored
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(deployHtml(1));
+    expectRetryStamp(await shellStamp(w), t0, t1);
+
+    const ops = w.caches.writes().filter((op) => op.cache === CACHE_NAMES.shell);
+    const putOffline = ops.findIndex((op) => op.op === "put" && op.url === OFFLINE_KEY);
+    const deleteOrphan = ops.findIndex((op) => op.op === "delete" && op.url === ORPHAN);
+    expect(putOffline).toBeGreaterThanOrEqual(0);
+    expect(deleteOrphan).toBeGreaterThan(putOffline);
+    expect(shellDeletes(w).map((op) => op.url)).toEqual([ORPHAN]);
+  });
+
+  it("a partial refresh of the deploy that is already stored prunes nothing", async () => {
+    const state: DeployState = { deploy: 1, blocked: new Set([chunk(1, FAILING_INDEX)]) };
+    const w = load(deployFetch(state));
+    await seedDeployShell(w, 1);
+    const t0 = Date.now();
+    await sync(w);
+    const t1 = Date.now();
+    expect(offlineFetches(w)).toBe(1); // the refresh ran
+    expectRetryStamp(await shellStamp(w), t0, t1); // and took the partial path
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([OFFLINE_KEY, ...deployAssets(1)].sort());
+    expect(shellDeletes(w)).toEqual([]);
+  });
+
+  it("success path unchanged: a refresh that completes replaces the html and prunes both older deploys", async () => {
+    const state: DeployState = { deploy: 1, blocked: new Set() };
+    ship(state, 1);
+    const w = load(deployFetch(state));
+    await w.dispatchInstall(); // partial first install
+    for (let d = 2; d <= 5; d++) {
+      ship(state, d);
+      await expireShell(w);
+      await sync(w);
+    }
+    expect(w.caches.urls(CACHE_NAMES.shell).length).toBe(1 + reachable(1).length + reachable(5).length);
+
+    // The failing asset recovers: the next refresh completes and keeps exactly the new deploy's shell.
+    state.deploy = 6;
+    state.blocked = new Set();
+    await expireShell(w);
+    const t0 = Date.now();
+    await sync(w);
+    const t1 = Date.now();
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([OFFLINE_KEY, ...deployAssets(6)].sort());
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(deployHtml(6));
+    expectFullStamp(await shellStamp(w), t0, t1);
+  });
+
+  it("success path unchanged: it prunes the previous shell's assets (unlike a partial refresh)", async () => {
+    const state: DeployState = { deploy: 2, blocked: new Set() };
+    const w = load(deployFetch(state));
+    await seedDeployShell(w, 1);
+    w.caches.clearLog();
+    await sync(w);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([OFFLINE_KEY, ...deployAssets(2)].sort());
+    expect(
+      shellDeletes(w)
+        .map((op) => op.url)
+        .sort(),
+    ).toEqual(deployAssets(1).sort());
   });
 });
 
