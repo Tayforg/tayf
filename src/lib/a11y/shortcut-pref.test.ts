@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -40,12 +42,29 @@ describe("constants", () => {
     expect(PENDING_MS).toBe(1000);
   });
 
-  it("lists the three g-sequences with Turkish labels", () => {
+  it("lists the g-sequences with Turkish labels", () => {
     expect(SHORTCUTS).toEqual([
       { keys: ["g", "h"], label: "Ana sayfa", href: "/" },
       { keys: ["g", "b"], label: "Kör noktalar", href: "/blindspots" },
       { keys: ["g", "s"], label: "Kaynaklar", href: "/sources" },
+      { keys: ["g", "t"], label: "Zaman çizelgesi", href: "/timeline" },
+      { keys: ["g", "e"], label: "Ekonomi", href: "/ekonomi" },
+      { keys: ["g", "k"], label: "Kaydedilenler", href: "/saved" },
     ]);
+  });
+
+  it("gives every g-sequence a unique second key that is not 'g' itself", () => {
+    const seconds = SHORTCUTS.map((s) => s.keys[1]);
+    expect(new Set(seconds).size).toBe(seconds.length);
+    expect(seconds).not.toContain("g");
+    for (const s of SHORTCUTS) expect(s.keys[0]).toBe("g");
+  });
+
+  it("points every g-sequence at a page that exists in src/app", () => {
+    for (const s of SHORTCUTS) {
+      const dir = s.href === "/" ? "src/app" : `src/app${s.href}`;
+      expect(existsSync(resolve(process.cwd(), dir, "page.tsx")), s.href).toBe(true);
+    }
   });
 });
 
