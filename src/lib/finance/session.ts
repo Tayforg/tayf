@@ -324,17 +324,47 @@ export function auctionStubSettledClose(a: {
 }
 
 /**
- * The "Seans içi" panel meta: the session day as dd.MM.yyyy plus, when the
- * session was cut (see intradayCutShort), the Istanbul time its bars stop at.
- * Without a usable `cutAtTs` it is the original line, unchanged.
+ * The header's session day when the 5-minute chart on screen belongs to an EARLIER session, else null
+ * (h198-ekonomi-2). A ticker with no bars for the newest session (bist_intraday_targets only collects tickers with
+ * a news row in the last 7 Istanbul days) drew the previous session's chart under a header that prices a newer one
+ * (KARCL 2026-11-15: header "son seans 13.11", chart 12.11). Both sides must be YYYY-MM-DD days (a longer ISO string
+ * is read by its first 10 characters); the result is the header's day as YYYY-MM-DD. Null for null, garbage, equal
+ * days and a chart that is later than the header. Never throws.
  */
-export function intradayPanelMeta(day: string, cutAtTs: string | null): string {
+export function intradayBehindDay(intradayDay: string | null, headerDay: string | null): string | null {
+  if (typeof intradayDay !== "string" || typeof headerDay !== "string") return null;
+  const chart = dayKey(intradayDay);
+  const header = dayKey(headerDay);
+  if (!DAY_KEY_RE.test(chart) || !DAY_KEY_RE.test(header)) return null;
+  return chart < header ? header : null;
+}
+
+/**
+ * The "Seans içi" panel meta: the session day as dd.MM.yyyy, then "5 dakikalık kapanışlar", then optionally
+ *  - when the session was cut (see intradayCutShort), the Istanbul time its bars stop at, and
+ *  - when the header prices a newer session than the chart (`behindDay`, from intradayBehindDay), that session's
+ *    dd.MM and that its bars were not collected (h198-ekonomi-2),
+ * and last "haberler işaretli". Without a usable `cutAtTs` and `behindDay` (absent, null, not YYYY-MM-DD, or not
+ * later than `day`) it is the original line, unchanged.
+ */
+export function intradayPanelMeta(day: string, cutAtTs: string | null, behindDay?: string | null): string {
   const date = day.split("-").reverse().join(".");
+  const parts = [date, "5 dakikalık kapanışlar"];
   const cutMs = cutAtTs == null ? Number.NaN : Date.parse(cutAtTs);
-  if (!Number.isFinite(cutMs)) return `${date}, 5 dakikalık kapanışlar, haberler işaretli`;
-  const cut = new Date(cutMs + IST_OFFSET_MS);
-  const clock = `${two(cut.getUTCHours())}:${two(cut.getUTCMinutes())}`;
-  return `${date}, 5 dakikalık kapanışlar, ${clock} sonrası veri eksik, haberler işaretli`;
+  if (Number.isFinite(cutMs)) {
+    const cut = new Date(cutMs + IST_OFFSET_MS);
+    parts.push(`${two(cut.getUTCHours())}:${two(cut.getUTCMinutes())} sonrası veri eksik`);
+  }
+  const behind = behindDayLabel(day, behindDay);
+  if (behind) parts.push(`${behind} seansının verisi toplanmadı`);
+  parts.push("haberler işaretli");
+  return parts.join(", ");
+}
+
+/** dd.MM of `behindDay` when it is a YYYY-MM-DD day later than the YYYY-MM-DD `day`, else null. */
+function behindDayLabel(day: string, behindDay: string | null | undefined): string | null {
+  if (typeof day !== "string" || typeof behindDay !== "string") return null;
+  return intradayBehindDay(day, behindDay) === null ? null : ddMMOfDay(behindDay);
 }
 
 /** Sub-kurus slack for comparing a price with a band limit (float noise only). */

@@ -42,6 +42,7 @@ import {
   auctionStubSettledClose,
   chartBaseline,
   companyMetaLine,
+  intradayBehindDay,
   intradayCutShort,
   intradayEmptyCopy,
   intradayPanelMeta,
@@ -343,6 +344,11 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // h108-kapdisclosures-2: the sibling code that carries this company's press, when this code has none.
   const pressNote = page.pressCode ? pressCodeNote(page.pressCode) : null;
   const sessionDay = intraday.day;
+  // h198-ekonomi-2: a ticker with no bars for the newest session (it was not in bist_intraday_targets that day) draws
+  // the previous session's chart under a header that prices a newer one. The panel meta then names that session; the
+  // header's day is the quote's own session day, or the daily bar's day when there is no quote.
+  const headerDay = quoteSessionDay(quote?.asOf) ?? (stat ? stat.lastDay.slice(0, 10) : null);
+  const behindDay = intradayBehindDay(sessionDay, headerDay);
   // h92-marketclock-1: a session whose bars stop before 17:30 although its daily bar is in (the ticker left
   // bist_intraday_targets mid-session and quotes-ingest never back-fills) would draw its last price, colour and
   // aria-label from a stale bar and contradict the header. The chart is then given the settled close, and the
@@ -445,7 +451,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         title="Seans içi"
         meta={
           sessionDay
-            ? intradayPanelMeta(sessionDay, cut && lastBar ? lastBar.ts : null)
+            ? intradayPanelMeta(sessionDay, cut && lastBar ? lastBar.ts : null, behindDay)
             : intradayRead.failed
               ? "5 dakikalık veri yüklenemedi"
               : "5 dakikalık veri henüz yok"

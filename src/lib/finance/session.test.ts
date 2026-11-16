@@ -11,6 +11,7 @@ import {
   auctionStubSettledClose,
   chartBaseline,
   companyMetaLine,
+  intradayBehindDay,
   intradayCutShort,
   intradayEmptyCopy,
   intradayPanelMeta,
@@ -768,6 +769,102 @@ describe("intradayPanelMeta (h92-marketclock-1)", () => {
 
   it("falls back to the plain string for a cut time it cannot read", () => {
     expect(intradayPanelMeta("2026-11-06", "garbage")).toBe("06.11.2026, 5 dakikalık kapanışlar, haberler işaretli");
+  });
+});
+
+// h198-ekonomi-2: /ekonomi/KARCL drew the 12.11 five-minute chart under a header that prices the 13.11 session
+// ("tavan 55,65 son seans 13.11"): the ticker had no bars for 13.11 (bist_intraday_targets only collects tickers
+// with a news row in the last 7 days) and nothing on the page said so. The panel meta now names the newer session.
+describe("intradayBehindDay (h198-ekonomi-2)", () => {
+  it("returns the header's day when the chart's session is earlier", () => {
+    expect(intradayBehindDay("2026-11-12", "2026-11-13")).toBe("2026-11-13");
+    expect(intradayBehindDay("2026-10-30", "2026-11-02")).toBe("2026-11-02");
+    expect(intradayBehindDay("2025-12-31", "2026-01-02")).toBe("2026-01-02");
+  });
+
+  it("is null when the days are equal", () => {
+    expect(intradayBehindDay("2026-11-13", "2026-11-13")).toBeNull();
+  });
+
+  it("is null when the chart is later than the header", () => {
+    expect(intradayBehindDay("2026-11-13", "2026-11-12")).toBeNull();
+  });
+
+  it("is null when either side is null", () => {
+    expect(intradayBehindDay(null, "2026-11-13")).toBeNull();
+    expect(intradayBehindDay("2026-11-12", null)).toBeNull();
+    expect(intradayBehindDay(null, null)).toBeNull();
+  });
+
+  it("is null for garbage on either side, and never throws", () => {
+    expect(intradayBehindDay("garbage", "2026-11-13")).toBeNull();
+    expect(intradayBehindDay("2026-11-12", "garbage")).toBeNull();
+    expect(intradayBehindDay("", "2026-11-13")).toBeNull();
+    expect(intradayBehindDay("2026-11-12", "")).toBeNull();
+    expect(intradayBehindDay("12.11.2026", "13.11.2026")).toBeNull();
+    expect(intradayBehindDay("2026-1-12", "2026-11-13")).toBeNull();
+    expect(intradayBehindDay(undefined as unknown as string, "2026-11-13")).toBeNull();
+    expect(intradayBehindDay("2026-11-12", 20261113 as unknown as string)).toBeNull();
+    expect(intradayBehindDay({} as unknown as string, [] as unknown as string)).toBeNull();
+  });
+
+  it("reads only the day of a longer ISO string and returns it as YYYY-MM-DD", () => {
+    expect(intradayBehindDay("2026-11-12", "2026-11-13T00:00:00+03:00")).toBe("2026-11-13");
+    expect(intradayBehindDay("2026-11-13T00:00:00Z", "2026-11-13T21:00:00Z")).toBeNull();
+  });
+});
+
+describe("intradayPanelMeta behindDay (h198-ekonomi-2)", () => {
+  it("keeps every 2-argument output byte-identical when behindDay is absent, null or undefined", () => {
+    expect(intradayPanelMeta("2026-11-12", null, null)).toBe(intradayPanelMeta("2026-11-12", null));
+    expect(intradayPanelMeta("2026-11-12", null, undefined)).toBe(intradayPanelMeta("2026-11-12", null));
+    expect(intradayPanelMeta("2026-11-12", "2026-11-12T09:05:00Z", null)).toBe(
+      intradayPanelMeta("2026-11-12", "2026-11-12T09:05:00Z"),
+    );
+    expect(intradayPanelMeta("2026-11-12", null)).toBe("12.11.2026, 5 dakikalık kapanışlar, haberler işaretli");
+  });
+
+  it("names the newer session whose bars were not collected", () => {
+    expect(intradayPanelMeta("2026-11-12", null, "2026-11-13")).toBe(
+      "12.11.2026, 5 dakikalık kapanışlar, 13.11 seansının verisi toplanmadı, haberler işaretli",
+    );
+  });
+
+  it("orders the clauses: date, 5 dakikalık kapanışlar, cut clause, behind clause, haberler işaretli", () => {
+    expect(intradayPanelMeta("2026-11-12", "2026-11-12T09:05:00Z", "2026-11-13")).toBe(
+      "12.11.2026, 5 dakikalık kapanışlar, 12:05 sonrası veri eksik, 13.11 seansının verisi toplanmadı, haberler işaretli",
+    );
+  });
+
+  it("adds nothing for a behindDay that is not later than the day", () => {
+    const plain = "12.11.2026, 5 dakikalık kapanışlar, haberler işaretli";
+    expect(intradayPanelMeta("2026-11-12", null, "2026-11-12")).toBe(plain);
+    expect(intradayPanelMeta("2026-11-12", null, "2026-11-11")).toBe(plain);
+  });
+
+  it("adds nothing for a behindDay it cannot parse", () => {
+    const plain = "12.11.2026, 5 dakikalık kapanışlar, haberler işaretli";
+    expect(intradayPanelMeta("2026-11-12", null, "garbage")).toBe(plain);
+    expect(intradayPanelMeta("2026-11-12", null, "")).toBe(plain);
+    expect(intradayPanelMeta("2026-11-12", null, "13.11.2026")).toBe(plain);
+  });
+
+  it("adds nothing when the day itself cannot be parsed, and the cut-clause fallback still holds", () => {
+    expect(intradayPanelMeta("garbage", null, "2026-11-13")).toBe("garbage, 5 dakikalık kapanışlar, haberler işaretli");
+    expect(intradayPanelMeta("2026-11-12", "garbage", "2026-11-13")).toBe(
+      "12.11.2026, 5 dakikalık kapanışlar, 13.11 seansının verisi toplanmadı, haberler işaretli",
+    );
+  });
+
+  it("composes with intradayBehindDay end to end (KARCL 2026-11-15: bars to 12.11, header 13.11)", () => {
+    const behind = intradayBehindDay("2026-11-12", "2026-11-13");
+    expect(intradayPanelMeta("2026-11-12", null, behind)).toBe(
+      "12.11.2026, 5 dakikalık kapanışlar, 13.11 seansının verisi toplanmadı, haberler işaretli",
+    );
+    // KRDMD has bars for 13.11: same day, no clause.
+    expect(intradayPanelMeta("2026-11-13", null, intradayBehindDay("2026-11-13", "2026-11-13"))).toBe(
+      "13.11.2026, 5 dakikalık kapanışlar, haberler işaretli",
+    );
   });
 });
 
