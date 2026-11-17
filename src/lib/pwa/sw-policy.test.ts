@@ -24,6 +24,7 @@ import {
   planTrim,
   wantsStoredCopy,
 } from "./sw-policy";
+import { buildServiceWorkerSource } from "./sw-source";
 
 const ORIGIN = "https://tayf.test";
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -70,11 +71,34 @@ describe("SW_CONFIG", () => {
       storedCopyMarkMs: 30_000,
       shellMaxAssets: 60,
       shellMaxAgeMs: 7 * DAY,
+      shellRetryMs: HOUR,
       syncWarmMax: 3,
       warmRetryMs: 12 * HOUR,
       syncMaxIds: SYNC_MAX_IDS,
     });
     expect(SW_CONFIG.caches).toEqual(CACHE_NAMES);
+  });
+
+  // h183-pwa-1: a shell that is missing assets is trusted for shellRetryMs, not shellMaxAgeMs.
+  it("shellRetryMs is a positive retry window strictly below shellMaxAgeMs", () => {
+    expect(typeof SW_CONFIG.shellRetryMs).toBe("number");
+    expect(Number.isFinite(SW_CONFIG.shellRetryMs)).toBe(true);
+    expect(SW_CONFIG.shellRetryMs).toBeGreaterThan(0);
+    expect(SW_CONFIG.shellRetryMs).toBeLessThan(SW_CONFIG.shellMaxAgeMs);
+  });
+
+  it("the built worker carries shellRetryMs in its injected CONFIG", () => {
+    const src = buildServiceWorkerSource();
+    const marker = "const CONFIG = ";
+    const at = src.indexOf(marker);
+    const end = src.indexOf(";\nconst CONTRACT = ");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const start = at + marker.length;
+    expect(end).toBeGreaterThan(start);
+    const injected = JSON.parse(src.slice(start, end)) as Record<string, unknown>;
+    expect(typeof injected.shellRetryMs).toBe("number");
+    expect(injected.shellRetryMs).toBe(SW_CONFIG.shellRetryMs);
+    expect(injected.shellMaxAgeMs).toBe(SW_CONFIG.shellMaxAgeMs);
   });
 });
 

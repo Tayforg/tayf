@@ -612,7 +612,7 @@ async function precacheShell() {
   const html = await res.text();
   const assets = extractShellAssets(html, ORIGIN, CONFIG.shellMaxAssets);
   const cache = await caches.open(CONFIG.caches.shell);
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     assets.map(function (url) {
       return fetch(url).then(function (asset) {
         if (!isCacheableResponse(asset, ORIGIN, "static")) throw new Error("asset is not cacheable");
@@ -620,6 +620,47 @@ async function precacheShell() {
       });
     })
   );
+  let missing = 0;
+  for (let i = 0; i < results.length; i++) {
+    if (results[i].status === "rejected") missing++;
+  }
+  if (missing > 0) {
+    // A shell that is missing assets is never trusted for shellMaxAgeMs and never replaces a previous shell:
+    // the stamp is back-dated so isExpired turns true after shellRetryMs and sync retries then. Without a previous
+    // shell (first install) the new html is stored so offline reading still works. install still resolves: a
+    // persistently failing asset must not disable offline reading. The previous html is read here, after the
+    // downloads, so a refresh that finished in the meantime is not overwritten by a stale snapshot taken before them.
+    // Pruning keeps two asset sets and nothing else: the set the html now stored as /offline names (the working
+    // previous shell, or the new html on a first install) and the set the new html names (what did download). Every
+    // other key goes, so while one asset keeps failing the cache holds at most two deploys of assets instead of
+    // growing with every deploy. Both sets come from the same extractor the success path uses.
+    const previous = await cache.match(OFFLINE_URL, { ignoreVary: true });
+    const retryAt = new Date(Date.now() - CONFIG.shellMaxAgeMs + CONFIG.shellRetryMs).toISOString();
+    let storedHtml = html;
+    if (previous) {
+      storedHtml = await previous.clone().text();
+      await cache.put(
+        OFFLINE_URL,
+        new Response(await previous.arrayBuffer(), { status: 200, headers: buildStoredHeaders(previous.headers, retryAt) })
+      );
+    } else {
+      await cache.put(OFFLINE_URL, new Response(html, { status: 200, headers: buildStoredHeaders(res.headers, retryAt) }));
+    }
+    const keepPartial = new Set(extractShellAssets(storedHtml, ORIGIN, CONFIG.shellMaxAssets));
+    for (let i = 0; i < assets.length; i++) keepPartial.add(assets[i]);
+    keepPartial.add(OFFLINE_URL);
+    const partialKeys = await cache.keys();
+    await Promise.all(
+      partialKeys
+        .filter(function (r) {
+          return !keepPartial.has(r.url);
+        })
+        .map(function (r) {
+          return cache.delete(r.url);
+        })
+    );
+    return;
+  }
   await cache.put(OFFLINE_URL, new Response(html, { status: 200, headers: buildStoredHeaders(res.headers, stamp()) }));
   const keep = new Set(assets);
   keep.add(OFFLINE_URL);

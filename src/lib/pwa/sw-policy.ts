@@ -59,6 +59,8 @@ export interface SwConfig {
   storedCopyMarkMs: number;
   shellMaxAssets: number;
   shellMaxAgeMs: number;
+  /** How long a shell that is missing assets is trusted before sync retries the precache. */
+  shellRetryMs: number;
   syncWarmMax: number;
   /** A pin that stored nothing is not retried by sync for this long (failure marker in the meta cache). */
   warmRetryMs: number;
@@ -82,6 +84,7 @@ export const SW_CONFIG: SwConfig = {
   storedCopyMarkMs: 30_000,
   shellMaxAssets: 60,
   shellMaxAgeMs: 7 * DAY_MS,
+  shellRetryMs: HOUR_MS,
   syncWarmMax: 3,
   warmRetryMs: 12 * HOUR_MS,
   syncMaxIds: SYNC_MAX_IDS,
