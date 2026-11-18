@@ -182,6 +182,43 @@ describe("clear-diet-button.tsx source", () => {
     expect(effect.indexOf("prevStep.current = step")).toBeLessThan(effect.indexOf(".focus()"));
   });
 
+  // h201-follows-2: Next 16 (cacheComponents) keeps /diyetim mounted in a hidden
+  // <Activity>, and a hide runs layout-effect cleanups. An armed 'Evet, sil' or a
+  // stale 'silindi' must not come back when the page is shown again. The effects
+  // cannot run in the node environment, so the source is guarded, as in
+  // follow-feed.test.tsx.
+  describe("resets the step when the page is hidden [h201-follows-2]", () => {
+    const component = src.slice(componentAt);
+    const effectAt = component.indexOf("useLayoutEffect(");
+    const effectEnd = component.indexOf("}, []);", effectAt);
+    const effect = component.slice(effectAt, effectEnd + "}, []);".length);
+
+    it("has a useLayoutEffect with no dependencies, declared above the early return", () => {
+      expect(effectAt).toBeGreaterThan(-1);
+      expect(effectEnd).toBeGreaterThan(effectAt);
+      expect(effect.endsWith("}, []);")).toBe(true);
+      expect(effectAt).toBeLessThan(component.indexOf("if (!available) return null;"));
+      expect(src).toMatch(/import\s*\{[^}]*useLayoutEffect[^}]*\}\s*from\s*["']react["']/);
+    });
+
+    it("its cleanup puts the step back to idle", () => {
+      expect(effect).toContain("setStep(\"idle\")");
+      // The mount body returns the cleanup: `() => () => {` (nothing runs on mount).
+      expect(effect).toContain("useLayoutEffect(() => () => {");
+    });
+
+    it("its cleanup also resets prevStep, or the reveal would read confirm -> idle and steal focus", () => {
+      expect(effect).toContain("prevStep.current = \"idle\"");
+      expect(effect.indexOf("prevStep.current = \"idle\"")).toBeLessThan(effect.indexOf("setStep(\"idle\")"));
+    });
+
+    it("documents the reveal path: idle -> idle moves no focus", () => {
+      expect(focusTargetFor("idle", "idle")).toBeNull();
+      // ...whereas a stale prevStep of 'confirm' is exactly what the reset prevents.
+      expect(focusTargetFor("confirm", "idle")).toBe("trigger");
+    });
+  });
+
   it("leaves the destructive action on the existing store function", () => {
     expect(src).toMatch(/import\s*\{[^}]*clearDiet[^}]*\}\s*from\s*["']@\/lib\/diet\/diet-store["']/);
     expect(src).toContain("clearDiet() ? \"done\" : \"failed\"");

@@ -8,6 +8,7 @@ import {
   TIMELINE_REFRESH_RETRY_MS,
   countNewClusters,
   newClustersLabel,
+  nextPollDelay,
   pageSignature,
   readHeadResponse,
   refreshOutcome,
@@ -115,12 +116,15 @@ export function isListStale(newestPublished: string | null, nowMs: number): bool
 /**
  * One head probe at mount for a stale list (see isListStale), instead of waiting TIMELINE_POLL_MS
  * for the poller's first poll. It takes the poller's own dependencies, so the fetch and the
- * `onRows` that counts are the very same ones: nothing is duplicated, and a probe result is
- * judged against the page exactly like a poll result.
+ * `onRows` that counts are the very same ones, and a probe result is judged against the page
+ * exactly like a poll result.
  *
  * - Judged once, at start, against `deps.now()`. A fresh list starts nothing at all.
  * - A hidden tab never fetches (the poller's rule too): the probe waits for the first change to
- *   visible and then runs, once.
+ *   visible and then runs, once. The poller counts mount as its last attempt, so a reveal
+ *   TIMELINE_POLL_MS or more after the start makes the poller poll at once, on this same event;
+ *   the deferred probe then gives way to that catch-up poll instead of fetching a second time.
+ *   A reveal sooner than that leaves nothing due for the poller, so the probe fetches.
  * - A failed request (`{ ok: false }` or a rejection) is dropped silently; the poller's own
  *   cadence and backoff are not involved.
  * - It only hands rows to `onRows` (a throwing one is swallowed): it never refreshes the page.
@@ -131,19 +135,24 @@ export function startStaleProbe(
   newestPublished: string | null,
 ): () => void {
   if (!isListStale(newestPublished, deps.now())) return () => {};
+  const startedAt = deps.now();
 
   let stopped = false;
   let started = false;
   let controller: AbortController | null = null;
   let unsubscribe: (() => void) | null = null;
 
-  function run(): void {
-    if (stopped || started) return;
-    started = true;
+  function stopWaiting(): void {
     if (unsubscribe !== null) {
       unsubscribe();
       unsubscribe = null;
     }
+  }
+
+  function run(): void {
+    if (stopped || started) return;
+    started = true;
+    stopWaiting();
     const mine = new AbortController();
     controller = mine;
     deps.fetchHead(mine.signal).then(
@@ -165,17 +174,22 @@ export function startStaleProbe(
     run();
   } else {
     unsubscribe = deps.subscribeVisibility(() => {
-      if (deps.isVisible()) run();
+      if (!deps.isVisible()) return;
+      if (deps.now() - startedAt >= nextPollDelay(0)) {
+        // The poller (mount = its last attempt, first delay nextPollDelay(0)) is due and polls on
+        // this same event: one fetch is enough. Done waiting either way.
+        started = true;
+        stopWaiting();
+        return;
+      }
+      run();
     });
   }
 
   return function stop(): void {
     if (stopped) return;
     stopped = true;
-    if (unsubscribe !== null) {
-      unsubscribe();
-      unsubscribe = null;
-    }
+    stopWaiting();
     if (controller !== null) {
       controller.abort();
       controller = null;

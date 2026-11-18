@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 const refresh = vi.fn();
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ refresh }),
+  useRouter: () => ({ refresh, bfcacheId: "_b_1_" }),
 }));
 
 import type { DailyHeadline, DailyPuzzle } from "@/lib/game/daily-set";
@@ -222,8 +222,12 @@ describe("OyunModes -- source guard: tabs stay mounted once opened", () => {
 
   it("keys DailyGame by the puzzle date and follows a changed initialMode (h201-game-1; behaviour in daily-game.test.tsx)", () => {
     expect(source).toContain('key={daily?.dateKey ?? "none"}');
-    expect(source).toContain("if (seededMode !== initialMode) {");
+    expect(source).toContain(
+      "if (seededFrom.mode !== initialMode || seededFrom.bfcacheId !== bfcacheId) {",
+    );
     expect(source).toContain("setMode(initialMode);");
+    // The navigation id, not a per-request stamp: refresh() keeps the id, so a retry stays put.
+    expect(source).toContain("const { bfcacheId } = useRouter();");
   });
 
   it("no longer switches the games with a mode ternary (which unmounted the other two)", () => {

@@ -395,11 +395,14 @@ export function serializeFollows(list: readonly Follow[]): string {
 
 /**
  * Adds a follow. A new entry starts with addedAt = seenAt = nowIso and no seen
- * ids. `nowIso` is the reader's DEVICE clock and is informational only: it is
- * never compared with a server timestamp. followBaseline treats that untouched
- * pair as "no baseline" (h201-follows-1), so the first /takip visit shows no
- * "yeni" and records the real baseline (a server instant plus the rows' ids).
- * Check order:
+ * ids. `nowIso` is the reader's DEVICE clock and is never compared with a server
+ * timestamp as it is: followBaseline treats that untouched pair as a device
+ * stamp (h201-follows-1). The first /takip visit moves it onto the server's
+ * timeline with the skew the response's Date header measures
+ * (skewCorrectedStamp), so the stories listed since the follow still show as
+ * "yeni"; with no readable Date header there is no baseline and nothing is new.
+ * Either way that visit records the real baseline (a server instant plus the
+ * rows' ids). Check order:
  * invalid, then exists (an already-followed entry in a full list is "exists",
  * not "full"), then full. On any non-"added" result `list` is the input.
  */
@@ -666,23 +669,67 @@ export function rowsShown(
 }
 
 /**
+ * Whether a follow's only stamp is the one addFollow wrote from the reader's
+ * DEVICE clock: no rows recorded (seenIds null) and seenAt still exactly its
+ * addedAt. (A stamp written by an older build after an empty visit cannot be
+ * told from this; the next visit rewrites it.)
+ */
+export function isDeviceStampOnly(
+  f: Pick<Follow, "addedAt" | "seenAt" | "seenIds">,
+): boolean {
+  return f.seenIds === null && f.addedAt !== null && f.seenAt === f.addedAt;
+}
+
+/**
+ * A device-clock stamp moved onto the server's timeline: `deviceIso` plus the
+ * measured skew (the server's instant minus the device's reading taken at the
+ * same moment), capped at the server instant, because a stamp can never lie in
+ * the server's future. Null when either stamp is unreadable, `deviceNowMs` is
+ * not finite, or the arithmetic leaves the Date range: the caller then has no
+ * baseline, never a guess.
+ */
+export function skewCorrectedStamp(
+  deviceIso: string,
+  serverNowIso: string | null | undefined,
+  deviceNowMs: number,
+): string | null {
+  const device = Date.parse(deviceIso);
+  const server = typeof serverNowIso === "string" ? Date.parse(serverNowIso) : Number.NaN;
+  if (!Number.isFinite(device) || !Number.isFinite(server) || !Number.isFinite(deviceNowMs)) {
+    return null;
+  }
+  const corrected = new Date(Math.min(device + (server - deviceNowMs), server));
+  return Number.isNaN(corrected.getTime()) ? null : corrected.toISOString();
+}
+
+/**
  * The baseline a /takip visit judges "yeni" against, from a stored follow
  * (h201-follows-1). addFollow stamps a new follow with addedAt = seenAt = the
  * reader's DEVICE clock. Until a visit replaces it (the visit stores a server
  * instant and the rows' ids, see markSeen) that stamp is the only baseline, and
  * isNewItem would compare it with a server timestamp: a clock 3 h behind turned
  * the previous 3 h of stories into "yeni", a clock 2 h ahead hid the next 2 h.
- * So a follow that has recorded no rows (seenIds null) and whose seenAt is still
- * exactly its addedAt has NO baseline: nothing is new on its first visit, and
- * that visit records the real one. Every other follow keeps what it stored.
- * (A stamp written by an older build after an empty visit cannot be told from a
- * server one; the next visit rewrites it.)
+ * So for a follow that has recorded no rows (seenIds null) and whose seenAt is
+ * still exactly its addedAt (isDeviceStampOnly) the device stamp is not used as
+ * it is:
+ *   - with `clock` (the response's Date header as an ISO instant, and the
+ *     device's own reading taken when it landed) addedAt is moved onto the
+ *     server's timeline (skewCorrectedStamp), so the stories listed since the
+ *     follow still show as "yeni" whatever the device clock says;
+ *   - without it, or when it is unreadable, the follow has NO baseline: nothing
+ *     is new on that visit, and the visit records the real one.
+ * Every other follow keeps what it stored.
  */
 export function followBaseline(
   f: Pick<Follow, "addedAt" | "seenAt" | "seenIds" | "seenFloor">,
+  clock?: { serverNowIso: string | null | undefined; deviceNowMs: number },
 ): SeenBaseline {
-  const deviceStamp = f.seenIds === null && f.addedAt !== null && f.seenAt === f.addedAt;
-  return { seenAt: deviceStamp ? null : f.seenAt, seenIds: f.seenIds, seenFloor: f.seenFloor };
+  if (!isDeviceStampOnly(f)) return { seenAt: f.seenAt, seenIds: f.seenIds, seenFloor: f.seenFloor };
+  const seenAt =
+    clock !== undefined && f.addedAt !== null
+      ? skewCorrectedStamp(f.addedAt, clock.serverNowIso, clock.deviceNowMs)
+      : null;
+  return { seenAt, seenIds: f.seenIds, seenFloor: f.seenFloor };
 }
 
 /** The follow's CURRENT stored baseline (followBaseline) by key; NO_BASELINE when it is not in the list. */

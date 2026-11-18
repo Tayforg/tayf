@@ -8,7 +8,7 @@ vi.mock("next/server", () => ({
   connection: async () => {},
 }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ refresh: vi.fn() }),
+  useRouter: () => ({ refresh: vi.fn(), bfcacheId: "_b_1_" }),
 }));
 vi.mock("@/lib/game/headline-pool", () => ({
   loadGameHeadlines: async () => [],

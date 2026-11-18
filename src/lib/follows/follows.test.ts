@@ -34,6 +34,7 @@ import {
   followRowsToShow,
   hasFollow,
   isFollowGundemKey,
+  isDeviceStampOnly,
   isFollowTopicSlug,
   isNewItem,
   KEYWORD_MAX,
@@ -57,6 +58,7 @@ import {
   SEARCH_FOLD_TO,
   serializeFollows,
   serverInstant,
+  skewCorrectedStamp,
   type Follow,
   type FollowItem,
 } from "./follows";
@@ -1784,6 +1786,133 @@ describe("followBaseline: a device-clock stamp is never compared with a server s
     expect(followBaselineOf(list, "konu:spor")).toEqual({ seenAt: SEEN_T, seenIds: [ID(1)], seenFloor: FLOOR });
     expect(followBaselineOf(list, "q:imf")).toEqual({ seenAt: null, seenIds: null, seenFloor: null });
     expect(followBaselineOf(list, "q:yok boyle")).toEqual({ seenAt: null, seenIds: null, seenFloor: null });
+  });
+});
+
+// The first visit after a follow keeps its "yeni" badges when the response's Date
+// header lets the device clock be measured against the server's (h201-follows-1,
+// second half): addedAt is moved onto the server's timeline instead of discarded.
+describe("followBaseline(f, clock): the device stamp is corrected by the measured skew [h201-follows-1]", () => {
+  const T = (hhmm: string) => `2026-11-17T${hhmm}:00.000Z`;
+  const fresh = (addedAtIso: string) =>
+    addFollow([], { kind: "q", value: "asgari ücret" }, addedAtIso).list[0] as Follow;
+  const stories = (...times: string[]) => times.map((hhmm, i) => row(i + 1, T(hhmm)));
+  const clock = (server: string, device: string) => ({
+    serverNowIso: T(server),
+    deviceNowMs: Date.parse(T(device)),
+  });
+
+  it("correct clock: a follow added at 09:00 and visited at 15:00 counts the 4 stories published in between", () => {
+    const f = fresh(T("09:00"));
+    const items = stories("14:30", "12:45", "11:00", "09:30");
+    // the old stored baseline (the device stamp) already counted them, the stripped one did not
+    expect(countNew(items, { seenAt: f.seenAt, seenIds: null, seenFloor: null })).toBe(4);
+    expect(countNew(items, followBaseline(f))).toBe(0);
+    expect(followBaseline(f, clock("15:00", "15:00")).seenAt).toBe(T("09:00"));
+    expect(countNew(items, followBaseline(f, clock("15:00", "15:00")))).toBe(4);
+  });
+
+  it("the first visit's own markSeen keeps those stories counted for the next visit too", () => {
+    const f = fresh(T("09:00"));
+    const items = stories("14:30", "12:45", "11:00", "09:30").map((r) => ({ ...r, updatedAt: r.firstPublished }));
+    const baseline = followBaseline(f, clock("15:00", "15:00"));
+    const rows = rowsShown(items, baseline, 5, T("15:00"));
+    expect(rows.ids).toHaveLength(4);
+    const visited = markSeen([f], new Map([[followKey(f), rows]]))[0] as Follow;
+    expect(visited.seenIds).toHaveLength(4);
+    // a fifth story lists after the visit: it is the only new one on the next visit
+    const later = [{ ...row(5, T("15:20")), updatedAt: T("15:20") }, ...items];
+    expect(countNew(later, followBaseline(visited))).toBe(1);
+  });
+
+  it("device clock 3 h behind: the 06:00 stamp is 09:00 on the server's timeline", () => {
+    const f = fresh(T("06:00"));
+    const b = followBaseline(f, clock("15:00", "12:00"));
+    expect(b.seenAt).toBe(T("09:00"));
+    expect(b.seenIds).toBeNull();
+    const items = stories("07:00", "08:30", "09:30", "11:00");
+    expect(items.map((r) => isNewItem(r, b))).toEqual([false, false, true, true]);
+    expect(countNew(items, b)).toBe(2);
+  });
+
+  it("device clock 2 h ahead: the 11:00 stamp is 09:00 on the server's timeline, so a 09:30 story is new", () => {
+    const f = fresh(T("11:00"));
+    const b = followBaseline(f, clock("15:00", "17:00"));
+    expect(b.seenAt).toBe(T("09:00"));
+    expect(countNew(stories("09:30"), b)).toBe(1);
+    // the uncorrected device stamp would have hidden it
+    expect(countNew(stories("09:30"), { seenAt: f.seenAt, seenIds: null, seenFloor: null })).toBe(0);
+  });
+
+  it("without a readable server instant the follow has no baseline, as before", () => {
+    const f = fresh(T("09:00"));
+    const items = stories("14:30", "12:45");
+    for (const serverNowIso of [null, undefined, "", "garbage"]) {
+      const b = followBaseline(f, { serverNowIso, deviceNowMs: Date.parse(T("15:00")) });
+      expect(b, String(serverNowIso)).toEqual({ seenAt: null, seenIds: null, seenFloor: null });
+      expect(countNew(items, b)).toBe(0);
+    }
+    expect(followBaseline(f, { serverNowIso: T("15:00"), deviceNowMs: Number.NaN }).seenAt).toBeNull();
+  });
+
+  it("only the device-stamp case reads the clock: a visited follow and a legacy one keep what they stored", () => {
+    const c = clock("15:00", "12:00");
+    const withRows = konu("spor", { seenAt: T("09:00"), seenIds: [ID(1)], seenFloor: FLOOR });
+    expect(followBaseline(withRows, c)).toEqual(followBaseline(withRows));
+    const emptyVisit = konu("spor", { addedAt: T("12:00"), seenAt: T("10:00") });
+    expect(followBaseline(emptyVisit, c).seenAt).toBe(T("10:00"));
+    expect(followBaseline(konu("spor", { addedAt: null, seenAt: SEEN_T }), c).seenAt).toBe(SEEN_T);
+    expect(followBaseline(konu("spor", { addedAt: NOW, seenAt: null }), c).seenAt).toBeNull();
+  });
+
+  it("isDeviceStampOnly names exactly the case followBaseline treats as a device stamp", () => {
+    expect(isDeviceStampOnly(fresh(T("09:00")))).toBe(true);
+    expect(isDeviceStampOnly(konu("spor", { seenAt: T("10:00") }))).toBe(false);
+    expect(isDeviceStampOnly(konu("spor", { seenIds: [ID(1)], seenFloor: FLOOR }))).toBe(false);
+    expect(isDeviceStampOnly(konu("spor", { addedAt: null, seenAt: NOW }))).toBe(false);
+  });
+});
+
+describe("skewCorrectedStamp [h201-follows-1]", () => {
+  const ms = (iso: string) => Date.parse(iso);
+
+  it("moves the device stamp by the measured offset (server minus device)", () => {
+    expect(
+      skewCorrectedStamp("2026-11-17T06:00:00.000Z", "2026-11-17T15:00:00.000Z", ms("2026-11-17T12:00:00.000Z")),
+    ).toBe("2026-11-17T09:00:00.000Z");
+    expect(
+      skewCorrectedStamp("2026-11-17T11:00:00.000Z", "2026-11-17T15:00:00.000Z", ms("2026-11-17T17:00:00.000Z")),
+    ).toBe("2026-11-17T09:00:00.000Z");
+  });
+
+  it("never returns a time after the server instant, whatever the device claims", () => {
+    const server = "2026-11-17T15:00:00.000Z";
+    // a stamp from the device's future (a clock that was set back since), and a tiny negative skew
+    const cases: Array<[string, number]> = [
+      ["2026-11-18T20:00:00.000Z", ms("2026-11-17T15:00:00.000Z")],
+      ["2026-11-17T15:00:00.000Z", ms("2026-11-17T14:59:59.000Z")],
+      ["2030-01-01T00:00:00.000Z", ms("2026-11-17T15:00:00.000Z")],
+      ["2026-11-17T15:00:00.000Z", ms("2026-11-17T15:00:00.000Z")],
+    ];
+    for (const [device, deviceNow] of cases) {
+      const out = skewCorrectedStamp(device, server, deviceNow);
+      expect(out, device).not.toBeNull();
+      expect(Date.parse(out as string), device).toBeLessThanOrEqual(ms(server));
+    }
+    expect(skewCorrectedStamp("2026-11-18T20:00:00.000Z", server, ms("2026-11-17T15:00:00.000Z"))).toBe(server);
+  });
+
+  it("is null when either stamp is unreadable or the device clock reading is not finite", () => {
+    const ok = "2026-11-17T15:00:00.000Z";
+    expect(skewCorrectedStamp("garbage", ok, 1)).toBeNull();
+    expect(skewCorrectedStamp("", ok, 1)).toBeNull();
+    expect(skewCorrectedStamp(ok, "garbage", 1)).toBeNull();
+    expect(skewCorrectedStamp(ok, null, 1)).toBeNull();
+    expect(skewCorrectedStamp(ok, undefined, 1)).toBeNull();
+    expect(skewCorrectedStamp(ok, ok, Number.NaN)).toBeNull();
+    expect(skewCorrectedStamp(ok, ok, Infinity)).toBeNull();
+    // arithmetic that leaves the Date range is null, not a RangeError
+    expect(skewCorrectedStamp("-271821-04-20T00:00:00.000Z", ok, 8.64e15)).toBeNull();
   });
 });
 

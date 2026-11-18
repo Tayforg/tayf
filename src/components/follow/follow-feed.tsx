@@ -21,6 +21,7 @@ import {
   followListCaption,
   followRowMeta,
   followRowsToShow,
+  isDeviceStampOnly,
   MAX_FOLLOWS,
   NO_BASELINE,
   parseFollowItems,
@@ -54,9 +55,13 @@ import {
 //
 // The baseline is a SERVER instant (h201-follows-1): each visit stores the ids of
 // the rows it showed and, as seenAt, the response's Date header or the newest
-// updatedAt of those rows (rowsShown), never the device clock, and a follow whose
-// only stamp is addFollow's device-clock one has no baseline (followBaseline), so
-// a clock that is hours off can neither invent nor hide a "yeni" badge.
+// updatedAt of those rows (rowsShown), never the device clock. A follow whose
+// only stamp is addFollow's device-clock one is anchored on its first visit: the
+// response's Date header measures the device clock's skew and addedAt is moved
+// onto the server's timeline (followBaseline with a clock), so the stories listed
+// since the follow keep their "yeni" badge and a clock that is hours off can
+// neither invent nor hide one. A response without a readable Date header leaves
+// that follow without a baseline (nothing is new), as the snapshot below does.
 //
 // Activity keeps this page mounted when the reader leaves it (cacheComponents), so
 // the per-visit refs would otherwise serve the first load for ever (h201-follows-2).
@@ -401,16 +406,32 @@ export function FollowFeed() {
         // The baseline the section renders with: this visit's snapshot, or, for a
         // follow fetched again on re-entry, what its previous visit stored.
         const refreshed = refreshing.current.has(item.key);
-        const baseline = refreshed
-          ? followBaselineOf(followsStore.read(), item.key)
-          : (seenSnapshotRef.current[item.key] ?? NO_BASELINE);
+        // First visit after a follow (h201-follows-1): the stored stamp is still
+        // addFollow's DEVICE one, which is not comparable with a story's server
+        // time. The response's Date header measures the device clock's skew right
+        // now, so addedAt is moved onto the server's timeline and the stories
+        // listed since the follow keep their "yeni" badge. No readable Date header:
+        // no baseline, as before. A refreshed follow keeps what its last visit stored.
+        const stored =
+          outcome.status === "ok" && !refreshed
+            ? followsStore.read().find((f) => followKey(f) === item.key)
+            : undefined;
+        const anchored =
+          outcome.status === "ok" && stored !== undefined && isDeviceStampOnly(stored)
+            ? followBaseline(stored, { serverNowIso: outcome.serverNow, deviceNowMs: Date.now() })
+            : null;
+        const baseline =
+          anchored ??
+          (refreshed
+            ? followBaselineOf(followsStore.read(), item.key)
+            : (seenSnapshotRef.current[item.key] ?? NO_BASELINE));
         if (outcome.status === "ok") {
           loadedKeys.current.add(item.key);
           erroredKeys.current.delete(item.key);
           shownRows.current.set(item.key, rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW, outcome.serverNow));
-          if (refreshed) {
+          if (refreshed) refreshing.current.delete(item.key);
+          if (refreshed || anchored !== null) {
             // The new list and its baseline replace the old pair in one batch.
-            refreshing.current.delete(item.key);
             setSeenSnapshot((prev) => ({ ...prev, [item.key]: baseline }));
           }
         } else {
