@@ -150,8 +150,25 @@ export function SavedEmptyState({
   );
 }
 
+/**
+ * A removal that follows another by less than this is the second tap of a double tap, not a
+ * second decision: the first tap drops its row at once, the next row slides under the pointer
+ * and the second tap lands on ITS X. There is no undo, so that story would be gone too.
+ */
+export const REMOVE_REPEAT_WINDOW_MS = 400;
+
+/**
+ * Whether a removal at `nowMs` is a repeat of the one at `lastAtMs` (null: none yet). A clock
+ * that went backwards, or a timestamp that is not a number, never blocks a removal.
+ */
+export function isRepeatRemoval(lastAtMs: number | null, nowMs: number): boolean {
+  if (lastAtMs === null || !Number.isFinite(lastAtMs) || !Number.isFinite(nowMs)) return false;
+  const elapsed = nowMs - lastAtMs;
+  return elapsed >= 0 && elapsed < REMOVE_REPEAT_WINDOW_MS;
+}
+
 export function SavedList() {
-  const { ids, count, toggle } = useBookmarks();
+  const { ids, count, remove } = useBookmarks();
   // false on the server and during hydration, when the bookmark store reads as
   // empty for every visitor. Until then the page shows a neutral placeholder,
   // not the empty state (h54-personal-1; /takip does the same).
@@ -173,6 +190,8 @@ export function SavedList() {
   const linkRefs = useRef(new Map<string, HTMLAnchorElement>());
   const emptyHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const pendingFocus = useRef<string | null | undefined>(undefined);
+  // performance.now() of the last removal handled (event handler only, never read during render).
+  const lastRemovalAt = useRef<number | null>(null);
 
   useEffect(() => {
     // Nothing to fetch when empty — the empty branch below renders the empty
@@ -294,6 +313,11 @@ export function SavedList() {
   }, [shownSig]);
 
   function handleRemove(row: SavedRow) {
+    // The monotonic clock of the page, not the wall clock: it measures the gap between two taps
+    // and the page's one wall-clock read stays the one in the loading effect.
+    const now = performance.now();
+    if (isRepeatRemoval(lastRemovalAt.current, now)) return;
+    lastRemovalAt.current = now;
     const shownIds = (rows ?? []).map((r) => r.id);
     pendingFocus.current = focusTargetAfterRemove(shownIds, row.id);
     setAnnouncement(
@@ -302,7 +326,9 @@ export function SavedList() {
     // Drop the row at once, so focus moves now instead of after the lookup
     // re-runs for the shorter bookmark list.
     setRows((prev) => prev?.filter((r) => r.id !== row.id) ?? prev);
-    toggle(row.id);
+    // remove, not toggle: toggle ADDS an id that is not in the list (a row another tab has already
+    // removed would come back), remove only ever removes this one id and is a no-op the second time.
+    remove(row.id);
   }
 
   if (!hydrated) {

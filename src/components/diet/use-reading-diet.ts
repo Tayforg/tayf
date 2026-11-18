@@ -16,6 +16,14 @@ import {
  * know storage is unavailable (there's nothing left to wait for in that
  * case). Callers use this to render a skeleton instead of flashing the
  * "no data" empty state during hydration.
+ *
+ * The 7- and 30-day windows are measured from `snap.readAt`, which the store
+ * keeps within DIET_SNAPSHOT_MAX_AGE_MS of the clock (h201-diet-1): every render
+ * reads the snapshot afresh, and subscribeDiet nudges this hook when the tab is
+ * shown again or ticks, so a long-lived tab or a preserved route never keeps
+ * counting clicks that have left the window. `summarizeDiet` stays pure; the
+ * `now` it gets is the snapshot's anchor, and a new anchor is a new snapshot
+ * object, which is what re-runs the memo.
  */
 export function useReadingDiet() {
   const snap = useSyncExternalStore(subscribeDiet, readDietSnapshot, getServerDietSnapshot);

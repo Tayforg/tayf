@@ -68,6 +68,18 @@ export function OyunModes({
   const [mode, setMode] = useState<OyunMode>(initialMode);
   // Tabs opened so far: each is rendered once and kept (see the doc comment).
   const [opened, setOpened] = useState<ReadonlySet<OyunMode>>(() => new Set([initialMode]));
+  // The `initialMode` that `mode` / `opened` were last seeded from. Next 16
+  // (cacheComponents) keeps this component's state when /oyun is entered again
+  // with other search params or after midnight, and only re-renders it with the
+  // new props, so a changed `initialMode` has to be followed here: otherwise
+  // /oyun?mod=gunluk stays on the Bölge tab the previous visit left open. A tab
+  // the reader picked is left alone while `initialMode` stays the same.
+  const [seededMode, setSeededMode] = useState<OyunMode>(initialMode);
+  if (seededMode !== initialMode) {
+    setSeededMode(initialMode);
+    setMode(initialMode);
+    setOpened((prev) => (prev.has(initialMode) ? prev : new Set([...prev, initialMode])));
+  }
 
   const selectMode = (m: OyunMode) => {
     setMode(m);
@@ -142,7 +154,16 @@ export function OyunModes({
       )}
       {opened.has("gunluk") && (
         <div hidden={mode !== "gunluk"}>
-          <DailyGame puzzle={daily} todayKey={todayKey} fellBack={dailyFellBack} />
+          {/* Keyed by the puzzle: DailyGame's round (phase, marks, share text) belongs
+              to ONE puzzle, so a re-render with another date (a replay link, the
+              footer link, midnight) must start a fresh instance instead of showing
+              the finished screen, and its answers, of a puzzle never played. */}
+          <DailyGame
+            key={daily?.dateKey ?? "none"}
+            puzzle={daily}
+            todayKey={todayKey}
+            fellBack={dailyFellBack}
+          />
         </div>
       )}
     </div>

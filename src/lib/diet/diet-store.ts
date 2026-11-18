@@ -25,10 +25,28 @@ export interface DietSnapshot {
 
 const EMPTY_ENTRIES: readonly DietEntry[] = [];
 
-// Module-level cache: readDietSnapshot recomputes (and re-stamps readAt)
-// only when the raw string changes, so unchanged reads return the exact
-// same object reference — required by useSyncExternalStore to avoid
-// re-render loops.
+/**
+ * How old a snapshot's `readAt` may get before the next read re-stamps it
+ * (h201-diet-1). `readAt` is the `now` the 7- and 30-day windows are measured
+ * from, so it has to follow the clock: it used to be stamped only when the raw
+ * localStorage string changed, and a tab (or a preserved /diyetim route) that
+ * outlived the last click kept counting clicks that had long left the window.
+ * One minute is far below the day-scale windows and long enough that readers
+ * in the same moment share one snapshot object.
+ */
+export const DIET_SNAPSHOT_MAX_AGE_MS = 60_000;
+
+/**
+ * Gap of the coarse tick that nudges subscribers while the tab stays visible,
+ * so a tab left open re-reads the anchor without any event. Hidden tabs are
+ * skipped; coming back is covered by visibilitychange / pageshow / focus.
+ */
+export const DIET_CLOCK_TICK_MS = 5 * 60_000;
+
+// Module-level cache: readDietSnapshot recomputes only when the raw string
+// changes or the anchor has aged out (DIET_SNAPSHOT_MAX_AGE_MS), so reads in
+// between return the exact same object reference — required by
+// useSyncExternalStore to avoid re-render loops.
 let cachedRaw: string | null | undefined; // undefined = "never read"
 let cachedAvailable = true;
 let cachedSnapshot: DietSnapshot = { available: true, entries: EMPTY_ENTRIES, readAt: 0 };
@@ -56,9 +74,24 @@ function readRaw(): { available: boolean; raw: string | null } {
   }
 }
 
+/**
+ * True when the cached `readAt` is at least DIET_SNAPSHOT_MAX_AGE_MS behind
+ * the clock, or ahead of it (the clock jumped backwards: windows anchored in
+ * the future would hide recent clicks).
+ */
+function anchorExpired(nowMs: number): boolean {
+  const age = nowMs - cachedSnapshot.readAt;
+  return age >= DIET_SNAPSHOT_MAX_AGE_MS || age < 0;
+}
+
 export function readDietSnapshot(): DietSnapshot {
   const { available, raw } = readRaw();
+  const nowMs = Date.now();
   if (raw === cachedRaw && available === cachedAvailable) {
+    if (!anchorExpired(nowMs)) return cachedSnapshot;
+    // Same storage, older clock: a NEW object (so subscribers re-render and
+    // the summary is recomputed) with the very same entries and a fresh anchor.
+    cachedSnapshot = { ...cachedSnapshot, readAt: nowMs };
     return cachedSnapshot;
   }
   cachedRaw = raw;
@@ -66,7 +99,7 @@ export function readDietSnapshot(): DietSnapshot {
   cachedSnapshot = {
     available,
     entries: available ? parseDiet(raw) : EMPTY_ENTRIES,
-    readAt: Date.now(),
+    readAt: nowMs,
   };
   return cachedSnapshot;
 }
@@ -77,16 +110,42 @@ export function getServerDietSnapshot(): DietSnapshot {
   return SERVER_SNAPSHOT;
 }
 
+/**
+ * Subscribes to storage changes (this tab and others) and to the clock: the
+ * callback also runs when the tab becomes visible again (visibilitychange,
+ * pageshow, focus), on a coarse tick while it stays visible, and once right
+ * after subscribing (a hidden <Activity> that is revealed re-subscribes, and
+ * its windows are then the most out of date). Each of those only makes
+ * useSyncExternalStore call readDietSnapshot again, which hands back a fresh
+ * snapshot once the anchor has aged out and the same object otherwise, so a
+ * nudge with nothing to show costs no render. Never called synchronously from
+ * inside subscribe; the unsubscribe removes every listener and timer.
+ */
 export function subscribeDiet(onChange: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   const handleStorage = (e: StorageEvent) => {
     if (e.key === DIET_STORAGE_KEY || e.key === null) onChange();
   };
+  const handleClock = () => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    onChange();
+  };
   window.addEventListener("storage", handleStorage);
   window.addEventListener(CHANGE_EVENT, onChange);
+  window.addEventListener("pageshow", handleClock);
+  window.addEventListener("focus", handleClock);
+  const hasDocument = typeof document !== "undefined";
+  if (hasDocument) document.addEventListener("visibilitychange", handleClock);
+  const tick = setInterval(handleClock, DIET_CLOCK_TICK_MS);
+  const first = setTimeout(handleClock, 0);
   return () => {
     window.removeEventListener("storage", handleStorage);
     window.removeEventListener(CHANGE_EVENT, onChange);
+    window.removeEventListener("pageshow", handleClock);
+    window.removeEventListener("focus", handleClock);
+    if (hasDocument) document.removeEventListener("visibilitychange", handleClock);
+    clearInterval(tick);
+    clearTimeout(first);
   };
 }
 

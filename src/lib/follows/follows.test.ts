@@ -13,11 +13,17 @@ import {
   addFollow,
   canonicalFollow,
   countNew,
+  createRemoveGuard,
+  FOLLOW_REFRESH_AFTER_MS,
+  FOLLOW_RETRY_AFTER_MS,
   FOLLOW_TOPIC_LABELS,
   FOLLOW_TOPIC_SLUGS,
   FOLLOWS_CHANGE_EVENT,
   FOLLOWS_KEY,
   followApiPath,
+  followBaseline,
+  followBaselineOf,
+  followKeysDueOnReentry,
   focusTargetAfterRemove,
   followEmptyText,
   followHref,
@@ -41,12 +47,16 @@ import {
   parseFollowItems,
   parseFollowKey,
   parseStoredFollows,
+  planFollowRemoval,
   RAW_MAX,
+  REMOVE_GUARD_MS,
   removeFollow,
+  rowsShown,
   runWithConcurrency,
   SEARCH_FOLD_FROM,
   SEARCH_FOLD_TO,
   serializeFollows,
+  serverInstant,
   type Follow,
   type FollowItem,
 } from "./follows";
@@ -1606,5 +1616,322 @@ describe("keyword follows share one identity [h112-follows-2]", () => {
       const viaUpper = canonicalFollow("q", e.label.toLocaleUpperCase("tr"));
       expect(viaUpper, e.label).toEqual({ kind: "gundem", value: e.key });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-follows-1: the "yeni" baseline is a SERVER instant. A story's
+// firstPublished is a server timestamp; comparing it with the reader's device
+// clock invented badges (clock behind) or hid them (clock ahead).
+// ---------------------------------------------------------------------------
+
+describe("serverInstant [h201-follows-1]", () => {
+  it("turns an HTTP Date header into the ISO instant the baseline stores", () => {
+    expect(serverInstant("Tue, 17 Nov 2026 09:58:00 GMT")).toBe("2026-11-17T09:58:00.000Z");
+    expect(serverInstant("2026-11-17T09:58:00+00:00")).toBe("2026-11-17T09:58:00.000Z");
+  });
+
+  it("is null for anything that is not a readable instant (never a guess, never the device clock)", () => {
+    for (const v of [null, undefined, "", "garbage", "Tue, 99 Zzz 2026", 5, {}, "x".repeat(200)]) {
+      expect(serverInstant(v as string | null), String(v)).toBeNull();
+    }
+  });
+});
+
+describe("rowsShown stamps the visit with a server instant [h201-follows-1]", () => {
+  const t = (iso: string) => iso;
+  const items = [
+    { id: ID(1), firstPublished: t("2026-10-22T08:00:00+00:00"), updatedAt: t("2026-10-22T08:50:00+00:00") },
+    { id: ID(2), firstPublished: t("2026-10-22T07:00:00+00:00"), updatedAt: t("2026-10-22T08:10:00+00:00") },
+    // below the cut: its (newer) updatedAt must not count, it was never on screen
+    { id: ID(3), firstPublished: t("2026-10-22T06:00:00+00:00"), updatedAt: t("2026-10-22T09:30:00+00:00") },
+  ];
+
+  it("with no response instant: the newest updatedAt among the rows actually shown", () => {
+    const rows = rowsShown(items, null, 2);
+    expect(rows.ids).toEqual([ID(1), ID(2)]);
+    expect(rows.at).toBe("2026-10-22T08:50:00.000Z");
+  });
+
+  it("the response instant wins when it is newer than every shown row, and never goes backwards", () => {
+    expect(rowsShown(items, null, 2, "2026-10-22T09:05:00.000Z").at).toBe("2026-10-22T09:05:00.000Z");
+    expect(rowsShown(items, null, 2, "2026-10-22T08:00:00.000Z").at).toBe("2026-10-22T08:50:00.000Z");
+  });
+
+  it("an empty result is stamped with the response instant, or null without one", () => {
+    expect(rowsShown([], null, 5, "2026-10-22T09:05:00.000Z")).toEqual({
+      ids: [],
+      floor: null,
+      at: "2026-10-22T09:05:00.000Z",
+    });
+    expect(rowsShown([], null, 5).at).toBeNull();
+    expect(rowsShown([], null, 5, "garbage").at).toBeNull();
+  });
+
+  it("falls back to firstPublished when no updatedAt is readable", () => {
+    const rows = rowsShown([{ id: ID(1), firstPublished: "2026-10-22T08:00:00+00:00", updatedAt: "x" }], null, 5);
+    expect(rows.at).toBe("2026-10-22T08:00:00.000Z");
+    expect(rowsShown([{ id: ID(1), firstPublished: "2026-10-22T08:00:00+00:00" }], null, 5).at).toBe(
+      "2026-10-22T08:00:00.000Z",
+    );
+  });
+
+  it("never reads the device clock, whatever it says", () => {
+    vi.useFakeTimers();
+    try {
+      for (const skewed of ["2001-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z"]) {
+        vi.setSystemTime(new Date(skewed));
+        expect(rowsShown(items, null, 2).at).toBe("2026-10-22T08:50:00.000Z");
+        expect(rowsShown([], null, 5).at).toBeNull();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("markSeen records the server stamp, not the device clock [h201-follows-1]", () => {
+  const base = { ids: [ID(1)], floor: "2026-10-22T07:00:00.000Z" };
+
+  it("uses the stamp the rows carry", () => {
+    const out = markSeen([konu("spor")], new Map([["konu:spor", { ...base, at: "2026-10-22T08:50:00.000Z" }]]), null);
+    expect(out[0]?.seenAt).toBe("2026-10-22T08:50:00.000Z");
+  });
+
+  it("falls back to the explicit server instant for rows without a stamp, and to null without one", () => {
+    const rows = new Map([["konu:spor", base]]);
+    expect(markSeen([konu("spor")], rows, "2026-10-22T09:05:00.000Z")[0]?.seenAt).toBe("2026-10-22T09:05:00.000Z");
+    expect(markSeen([konu("spor")], rows, null)[0]?.seenAt).toBeNull();
+    expect(markSeen([konu("spor")], rows)[0]?.seenAt).toBeNull();
+    // an unreadable stamp is not stored either
+    const bad = new Map([["konu:spor", { ...base, at: "garbage" }]]);
+    expect(markSeen([konu("spor")], bad, null)[0]?.seenAt).toBeNull();
+  });
+
+  it("an empty visit keeps the server stamp and the legacy rule, whatever the device clock says", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2031-05-05T05:05:05.000Z"));
+      const out = markSeen(
+        [konu("spor", { seenIds: [ID(1)], seenFloor: FLOOR })],
+        new Map([["konu:spor", { ids: [], floor: null, at: "2026-10-22T09:05:00.000Z" }]]),
+        null,
+      );
+      expect(out[0]).toEqual(konu("spor", { seenAt: "2026-10-22T09:05:00.000Z", seenIds: null, seenFloor: null }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("followBaseline: a device-clock stamp is never compared with a server stamp [h201-follows-1]", () => {
+  const HOUR = 3_600_000;
+  const SERVER_NOW = Date.parse("2026-11-17T10:00:00.000Z");
+  const published = (hoursAgo: number, n = 9) =>
+    row(n, new Date(SERVER_NOW - hoursAgo * HOUR).toISOString());
+
+  it("a follow nobody has visited yet (addFollow's addedAt === seenAt, no ids) has no baseline", () => {
+    const fresh = addFollow([], { kind: "q", value: "asgari ücret" }, "2026-11-17T07:00:00.000Z").list[0] as Follow;
+    expect(followBaseline(fresh)).toEqual({ seenAt: null, seenIds: null, seenFloor: null });
+  });
+
+  it("repro: device clock 3 h behind -> items of the previous 3 h are NOT invented as 'yeni'", () => {
+    // The follow is created at 10:00 server time on a clock that says 07:00.
+    const fresh = addFollow([], { kind: "q", value: "asgari ücret" }, "2026-11-17T07:00:00.000Z").list[0] as Follow;
+    const items = [published(0.5, 1), published(1, 2), published(2.5, 3)];
+    // the old rule compared against the device stamp and called all three new
+    expect(countNew(items, { seenAt: fresh.seenAt, seenIds: null, seenFloor: null })).toBe(3);
+    expect(countNew(items, followBaseline(fresh))).toBe(0);
+  });
+
+  it("repro: device clock 2 h ahead -> an empty visit's stamp comes from the server, so a story after it is new", () => {
+    const fresh = addFollow([], { kind: "q", value: "asgari ücret" }, "2026-11-17T12:00:00.000Z").list[0] as Follow;
+    // the visit returned nothing: stamped with the response's Date, not with 12:00
+    const visited = markSeen(
+      [fresh],
+      // "asgari ücret" is a gündem hub label, so the follow is stored as that hub
+      new Map([[followKey(fresh), rowsShown([], null, 5, "2026-11-17T10:00:00.000Z")]]),
+    )[0] as Follow;
+    expect(followKey(fresh)).toBe("gundem:asgari-ucret");
+    expect(visited.seenAt).toBe("2026-11-17T10:00:00.000Z");
+    const story = [published(-0.5)]; // first published 30 min after the visit
+    expect(countNew(story, followBaseline(visited))).toBe(1);
+    // the stamp it replaced would have hidden it
+    expect(countNew(story, { seenAt: fresh.seenAt, seenIds: null, seenFloor: null })).toBe(0);
+  });
+
+  it("a visited follow keeps its baseline: ids and floor, or a server seenAt after an empty visit", () => {
+    const withRows = konu("spor", { seenAt: "2026-11-17T09:00:00.000Z", seenIds: [ID(1)], seenFloor: FLOOR });
+    expect(followBaseline(withRows)).toEqual({
+      seenAt: "2026-11-17T09:00:00.000Z",
+      seenIds: [ID(1)],
+      seenFloor: FLOOR,
+    });
+    const emptyVisit = konu("spor", { addedAt: "2026-11-17T12:00:00.000Z", seenAt: "2026-11-17T10:00:00.000Z" });
+    expect(followBaseline(emptyVisit).seenAt).toBe("2026-11-17T10:00:00.000Z");
+  });
+
+  it("a legacy follow (no addedAt) and one without any stamp behave as stored", () => {
+    expect(followBaseline(konu("spor", { addedAt: null, seenAt: SEEN_T })).seenAt).toBe(SEEN_T);
+    expect(followBaseline(konu("spor", { addedAt: NOW, seenAt: null })).seenAt).toBeNull();
+  });
+
+  it("followBaselineOf reads the CURRENT stored baseline of a key, NO_BASELINE for an unknown one", () => {
+    const list = [
+      konu("spor", { seenAt: SEEN_T, seenIds: [ID(1)], seenFloor: FLOOR }),
+      q("IMF", { addedAt: NOW, seenAt: NOW }),
+    ];
+    expect(followBaselineOf(list, "konu:spor")).toEqual({ seenAt: SEEN_T, seenIds: [ID(1)], seenFloor: FLOOR });
+    expect(followBaselineOf(list, "q:imf")).toEqual({ seenAt: null, seenIds: null, seenFloor: null });
+    expect(followBaselineOf(list, "q:yok boyle")).toEqual({ seenAt: null, seenIds: null, seenFloor: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-follows-2: Activity keeps /takip mounted, so the per-visit state (what is
+// loaded, what failed, which rows were shown) survives a re-entry. These are the
+// decisions the component takes when the page becomes visible again.
+// ---------------------------------------------------------------------------
+
+describe("followKeysDueOnReentry [h201-follows-2]", () => {
+  const T0 = 1_000_000;
+  const settled = (entries: Array<[string, number, boolean]>) =>
+    new Map(entries.map(([key, at, ok]) => [key, { at, ok }] as const));
+
+  it("pins the windows: a list is fresh for the 60 s the API caches it, a failure is retried after 10 s", () => {
+    expect(FOLLOW_REFRESH_AFTER_MS).toBe(60_000);
+    expect(FOLLOW_RETRY_AFTER_MS).toBe(10_000);
+  });
+
+  it("a list that loaded a moment ago is not fetched again (no refetch storm on a bounce)", () => {
+    const m = settled([["konu:spor", T0, true], ["q:imf", T0 - 30_000, true]]);
+    expect(followKeysDueOnReentry(m, T0 + 5_000)).toEqual([]);
+    expect(followKeysDueOnReentry(m, T0 + FOLLOW_REFRESH_AFTER_MS - 1)).toEqual(["q:imf"]);
+  });
+
+  it("a stale list is due exactly at the window, hours later too", () => {
+    const m = settled([["konu:spor", T0, true]]);
+    expect(followKeysDueOnReentry(m, T0 + FOLLOW_REFRESH_AFTER_MS - 1)).toEqual([]);
+    expect(followKeysDueOnReentry(m, T0 + FOLLOW_REFRESH_AFTER_MS)).toEqual(["konu:spor"]);
+    expect(followKeysDueOnReentry(m, T0 + 3 * 3_600_000)).toEqual(["konu:spor"]);
+  });
+
+  it("a failed follow is retried on re-entry, but not hammered within the cool-down (a 429 stays a 429)", () => {
+    const m = settled([["konu:spor", T0, false]]);
+    expect(followKeysDueOnReentry(m, T0 + FOLLOW_RETRY_AFTER_MS - 1)).toEqual([]);
+    expect(followKeysDueOnReentry(m, T0 + FOLLOW_RETRY_AFTER_MS)).toEqual(["konu:spor"]);
+  });
+
+  it("keeps the map's order and returns only what is due", () => {
+    const m = settled([
+      ["q:a1", T0, true],
+      ["q:b2", T0 + 100_000, true],
+      ["konu:spor", T0, false],
+    ]);
+    expect(followKeysDueOnReentry(m, T0 + 120_000)).toEqual(["q:a1", "konu:spor"]);
+  });
+
+  it("an empty map has nothing due, and an answer stamped in the future (clock moved back) is due", () => {
+    expect(followKeysDueOnReentry(new Map(), T0)).toEqual([]);
+    expect(followKeysDueOnReentry(settled([["q:a1", T0 + 1_000, true]]), T0)).toEqual(["q:a1"]);
+    expect(followKeysDueOnReentry(settled([["q:a1", Number.NaN, true]]), T0)).toEqual(["q:a1"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-follows-3: tapping X twice removed two follows. The first removal commits
+// synchronously, the next follow's header slides under the pointer, and the second
+// tap lands on ITS X.
+// ---------------------------------------------------------------------------
+
+describe("createRemoveGuard [h201-follows-3]", () => {
+  it("pins the window at 400 ms", () => {
+    expect(REMOVE_GUARD_MS).toBe(400);
+  });
+
+  it("the first removal goes through", () => {
+    expect(createRemoveGuard().allow("konu:spor", 1_000)).toBe(true);
+  });
+
+  it("a second tap on the same follow within the window is ignored (idempotent per id)", () => {
+    const g = createRemoveGuard();
+    expect(g.allow("konu:spor", 1_000)).toBe(true);
+    expect(g.allow("konu:spor", 1_050)).toBe(false);
+  });
+
+  it("a second tap on the NEXT follow that slid under the pointer is ignored too", () => {
+    const g = createRemoveGuard();
+    expect(g.allow("konu:spor", 1_000)).toBe(true);
+    expect(g.allow("q:imf", 1_120)).toBe(false);
+  });
+
+  it("a deliberate removal after the window goes through, at the boundary included", () => {
+    const g = createRemoveGuard();
+    expect(g.allow("konu:spor", 1_000)).toBe(true);
+    expect(g.allow("q:imf", 1_000 + REMOVE_GUARD_MS - 1)).toBe(false);
+    expect(g.allow("q:imf", 1_000 + REMOVE_GUARD_MS)).toBe(true);
+  });
+
+  it("ignored taps do not stretch the window: it runs from the last REMOVAL", () => {
+    const g = createRemoveGuard();
+    expect(g.allow("a", 0)).toBe(true);
+    expect(g.allow("b", 300)).toBe(false);
+    expect(g.allow("b", 450)).toBe(true);
+  });
+
+  it("a clock that moved backwards cannot lock removal: the tap goes through", () => {
+    const g = createRemoveGuard();
+    expect(g.allow("a", 10_000)).toBe(true);
+    expect(g.allow("b", 5_000)).toBe(true);
+  });
+
+  it("guards are independent of each other and take a custom window", () => {
+    const a = createRemoveGuard();
+    const b = createRemoveGuard(50);
+    expect(a.allow("x", 0)).toBe(true);
+    expect(b.allow("x", 0)).toBe(true);
+    expect(a.allow("y", 60)).toBe(false);
+    expect(b.allow("y", 60)).toBe(true);
+  });
+});
+
+describe("planFollowRemoval: what a tap on a follow's X does [h201-follows-3]", () => {
+  const keys = ["q:a1", "konu:spor", "q:b2"];
+
+  it("removes an existing follow and names the follow that should take focus", () => {
+    const g = createRemoveGuard();
+    expect(planFollowRemoval(keys, "konu:spor", g, 1_000)).toEqual({ focus: "q:b2" });
+  });
+
+  it("the last follow hands focus to the one before it, the only follow to the empty state (null)", () => {
+    expect(planFollowRemoval(keys, "q:b2", createRemoveGuard(), 0)).toEqual({ focus: "konu:spor" });
+    expect(planFollowRemoval(["q:a1"], "q:a1", createRemoveGuard(), 0)).toEqual({ focus: null });
+  });
+
+  it("a double tap removes ONE follow: the second tap lands on the follow that slid into the slot", () => {
+    const g = createRemoveGuard();
+    expect(planFollowRemoval(keys, "q:a1", g, 1_000)).toEqual({ focus: "konu:spor" });
+    // the list is now ["konu:spor", "q:b2"] and the second tap hits konu:spor's X
+    expect(planFollowRemoval(["konu:spor", "q:b2"], "konu:spor", g, 1_150)).toBeNull();
+  });
+
+  it("a second tap on a follow that is already gone does nothing and keeps the pending focus target", () => {
+    const g = createRemoveGuard();
+    expect(planFollowRemoval(keys, "q:a1", g, 1_000)).toEqual({ focus: "konu:spor" });
+    expect(planFollowRemoval(["konu:spor", "q:b2"], "q:a1", g, 5_000)).toBeNull();
+  });
+
+  it("a key that is not in the list never starts the window", () => {
+    const g = createRemoveGuard();
+    expect(planFollowRemoval(keys, "q:yok boyle", g, 1_000)).toBeNull();
+    expect(planFollowRemoval(keys, "q:a1", g, 1_010)).toEqual({ focus: "konu:spor" });
+  });
+
+  it("a deliberate second removal after the window goes through", () => {
+    const g = createRemoveGuard();
+    expect(planFollowRemoval(keys, "q:a1", g, 1_000)).not.toBeNull();
+    expect(planFollowRemoval(["konu:spor", "q:b2"], "konu:spor", g, 1_000 + REMOVE_GUARD_MS)).toEqual({
+      focus: "q:b2",
+    });
   });
 });

@@ -9,6 +9,7 @@ import {
   EmptyState,
   FeedFrame,
   FollowFeed,
+  fetchFollowState,
   FollowSection,
   followsFromSignature,
   followsSignature,
@@ -219,7 +220,7 @@ describe("retry result announcement wiring (source guard: effects need a browser
   const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
   const retryStart = src.indexOf("function handleRetry");
   const handleRetry = src.slice(retryStart, src.indexOf("\n  }\n", retryStart));
-  const effectStart = src.indexOf("useEffect(() => {");
+  const effectStart = src.indexOf("useEffect(() => {\n    // Rebuilt from the signature");
   const effectEnd = src.indexOf("}, [keysSignature, retryNonce]);");
   const fetchEffect = src.slice(effectStart, effectEnd);
 
@@ -317,7 +318,7 @@ describe("initialFailureAnnouncement [h90-livearia-3]", () => {
 
 describe("initial failure announcement wiring (source guard: effects need a browser) [h90-livearia-3]", () => {
   const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
-  const effectStart = src.indexOf("useEffect(() => {");
+  const effectStart = src.indexOf("useEffect(() => {\n    // Rebuilt from the signature");
   const effectEnd = src.indexOf("}, [keysSignature, retryNonce]);");
   const fetchEffect = src.slice(effectStart, effectEnd);
   /** The worker callback that runs per follow, up to the end of runWithConcurrency. */
@@ -1159,7 +1160,7 @@ describe("followsSignature / followsFromSignature (h112-follows-2)", () => {
 
 describe("the visit records the rows it showed (source guard: effects need a browser) [h112-follows-1]", () => {
   const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
-  const effectStart = src.indexOf("useEffect(() => {");
+  const effectStart = src.indexOf("useEffect(() => {\n    // Rebuilt from the signature");
   const effectEnd = src.indexOf("}, [keysSignature, retryNonce]);");
   const fetchEffect = src.slice(effectStart, effectEnd);
 
@@ -1176,13 +1177,14 @@ describe("the visit records the rows it showed (source guard: effects need a bro
 
   it("keeps the first baseline of each follow (seenAt, seenIds, seenFloor) for the whole visit", () => {
     expect(src).toContain("useState<Record<string, SeenBaseline>>({})");
-    expect(src).toContain("seenIds: f.seenIds");
-    expect(src).toContain("seenFloor: f.seenFloor");
+    expect(src).toContain("next[key] = seenSnapshot[key] ?? followBaseline(f);");
   });
 
   it("remembers the rows rendered per follow with the baseline the section uses, in a ref pruned with the others", () => {
     expect(src).toContain("shownRows = useRef<Map<string, SeenRows>>(new Map())");
-    expect(fetchEffect).toContain("shownRows.current.set(item.key, rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW));");
+    expect(fetchEffect).toContain(
+      "shownRows.current.set(item.key, rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW, outcome.serverNow));",
+    );
     expect(fetchEffect).toContain("if (!live.has(key)) shownRows.current.delete(key);");
     // the section renders followRowsToShow(items, same baseline, ROWS_PER_FOLLOW)
     expect(src).toContain("followRowsToShow(state.items, { seenAt, seenIds, seenFloor }, ROWS_PER_FOLLOW)");
@@ -1191,7 +1193,206 @@ describe("the visit records the rows it showed (source guard: effects need a bro
   it("marks the loaded follows seen with those rows (a Map), after the failures were announced, never with bare keys", () => {
     const tail = fetchEffect.slice(fetchEffect.lastIndexOf("announceUnannounced(retryText);"));
     expect(tail).toContain("shown.set(w.key, rows)");
-    expect(tail).toContain("followsStore.markSeen(shown, new Date().toISOString());");
+    expect(tail).toContain("followsStore.markSeen(shown);");
     expect(tail).not.toContain("new Set(");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-follows-1: the response carries the SERVER's instant (Date header); the
+// visit's baseline is built from it, never from the device clock.
+// ---------------------------------------------------------------------------
+
+describe("fetchFollowState reads the server's instant [h201-follows-1]", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const body = (items: FollowItem[]) => JSON.stringify({ items });
+  const stubFetch = (res: Response | Error) => {
+    const fn = vi.fn(async () => {
+      if (res instanceof Error) throw res;
+      return res;
+    });
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  };
+
+  it("returns the items together with the response's Date header as an ISO instant", async () => {
+    const fn = stubFetch(
+      new Response(body([item()]), { status: 200, headers: { Date: "Tue, 17 Nov 2026 09:58:00 GMT" } }),
+    );
+    const state = await fetchFollowState(EKONOMI, new AbortController().signal);
+    expect(state).toEqual({ status: "ok", items: [item()], serverNow: "2026-11-17T09:58:00.000Z" });
+    expect(fn).toHaveBeenCalledTimes(1);
+    const call = fn.mock.calls[0] as unknown as [string, RequestInit];
+    expect(call[0]).toBe(followApiPath(EKONOMI));
+  });
+
+  it("a response without a readable Date header carries null, never the device clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2031-05-05T05:05:05.000Z"));
+    stubFetch(new Response(body([]), { status: 200 }));
+    const state = await fetchFollowState(SECIM, new AbortController().signal);
+    expect(state).toEqual({ status: "ok", items: [], serverNow: null });
+    stubFetch(new Response(body([]), { status: 200, headers: { Date: "garbage" } }));
+    expect(await fetchFollowState(SECIM, new AbortController().signal)).toEqual({
+      status: "ok",
+      items: [],
+      serverNow: null,
+    });
+  });
+
+  it("keeps the error mapping: 429 is rate, other statuses, a bad body and a network failure are down", async () => {
+    const signal = new AbortController().signal;
+    stubFetch(new Response("{}", { status: 429 }));
+    expect(await fetchFollowState(DEVA, signal)).toEqual({ status: "error", reason: "rate" });
+    stubFetch(new Response("{}", { status: 503 }));
+    expect(await fetchFollowState(DEVA, signal)).toEqual({ status: "error", reason: "down" });
+    stubFetch(new Response('{"nope":1}', { status: 200 }));
+    expect(await fetchFollowState(DEVA, signal)).toEqual({ status: "error", reason: "down" });
+    stubFetch(new TypeError("Failed to fetch"));
+    expect(await fetchFollowState(DEVA, signal)).toEqual({ status: "error", reason: "down" });
+  });
+});
+
+describe("the visit never reads the device clock (source guard) [h201-follows-1]", () => {
+  const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
+  const code = src
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+
+  it("has no new Date( and no toISOString in code: the baseline cannot come from the device", () => {
+    expect(code).not.toMatch(/new Date\(/);
+    expect(code).not.toContain("toISOString");
+  });
+
+  it("marks the visit seen with the rows alone (each carries its server stamp)", () => {
+    expect(code).toContain("followsStore.markSeen(shown);");
+  });
+
+  it("the snapshot of a follow is its stored baseline minus a device-clock stamp (followBaseline)", () => {
+    expect(code).toContain("next[key] = seenSnapshot[key] ?? followBaseline(f);");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-follows-2: Activity keeps FollowFeed mounted, so loadedKeys / erroredKeys /
+// shownRows survive a re-entry. The effects cannot run in the node environment;
+// the decision itself (followKeysDueOnReentry) is unit-tested in follows.test.ts,
+// the wiring is guarded here.
+// ---------------------------------------------------------------------------
+
+describe("re-entry refreshes stale and failed follows (source guard: effects need a browser) [h201-follows-2]", () => {
+  const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
+  const fetchStart = src.indexOf("useEffect(() => {\n    // Rebuilt from the signature");
+  const fetchEnd = src.indexOf("}, [keysSignature, retryNonce]);");
+  const fetchEffect = src.slice(fetchStart, fetchEnd);
+  const dueAt = src.indexOf("followKeysDueOnReentry(settledAt.current");
+  const reentryStart = src.lastIndexOf("useEffect(() => {", dueAt);
+  const reentryEnd = src.indexOf("}, []);", dueAt);
+  const reentry = src.slice(reentryStart, reentryEnd);
+
+  it("slices the code it is guarding", () => {
+    expect(fetchStart).toBeGreaterThan(-1);
+    expect(fetchEnd).toBeGreaterThan(fetchStart);
+    expect(dueAt).toBeGreaterThan(-1);
+    expect(reentryStart).toBeGreaterThan(-1);
+    expect(reentryEnd).toBeGreaterThan(dueAt);
+  });
+
+  it("the re-entry effect is keyed on nothing (it re-runs when Activity shows the page again) and is declared BEFORE the fetch effect", () => {
+    expect(reentryEnd).toBeLessThan(fetchStart);
+    expect(src.slice(reentryEnd, reentryEnd + 7)).toBe("}, []);");
+  });
+
+  it("asks followKeysDueOnReentry with the settle log and the clock, once per entry", () => {
+    expect(reentry).toContain("followKeysDueOnReentry(settledAt.current, Date.now())");
+  });
+
+  it("takes every due key out of the per-visit refs, so the fetch effect that follows sees it as todo", () => {
+    for (const ref of ["loadedKeys", "erroredKeys", "shownRows", "settledAt"]) {
+      expect(reentry, ref).toContain(`${ref}.current.delete(key)`);
+    }
+    expect(reentry).toContain("refreshing.current.add(key)");
+  });
+
+  it("never calls a state setter itself (a synchronous setState in an effect body is a lint error); the stale list stays on screen until the new one lands", () => {
+    expect(reentry).not.toMatch(/\bset[A-Z]\w*\(/);
+  });
+
+  it("keeps the log of settled fetches and the refresh flags in refs", () => {
+    expect(src).toContain("settledAt = useRef<Map<string, FollowSettle>>(new Map())");
+    expect(src).toContain("refreshing = useRef<Set<string>>(new Set())");
+  });
+
+  it("records every settled fetch (not aborted) with the clock and whether it succeeded", () => {
+    const aborted = fetchEffect.indexOf("if (controller.signal.aborted) return;");
+    const settle = fetchEffect.indexOf('settledAt.current.set(item.key, { at: Date.now(), ok: outcome.status === "ok" })');
+    expect(aborted).toBeGreaterThan(-1);
+    expect(settle).toBeGreaterThan(aborted);
+  });
+
+  it("a refreshed follow is judged against its CURRENT stored baseline (the previous visit's markSeen), and the snapshot is replaced together with the list", () => {
+    expect(fetchEffect).toContain("refreshing.current.has(item.key)");
+    expect(fetchEffect).toContain("followBaselineOf(followsStore.read(), item.key)");
+    expect(fetchEffect).toContain("seenSnapshotRef.current[item.key] ?? NO_BASELINE");
+    const okStart = fetchEffect.indexOf('if (outcome.status === "ok") {');
+    const elseStart = fetchEffect.indexOf("} else {", okStart);
+    const okBranch = fetchEffect.slice(okStart, elseStart);
+    expect(okBranch).toContain("setSeenSnapshot(");
+    expect(okBranch).toContain("refreshing.current.delete(item.key)");
+    // a failed refresh keeps its flag, so the reader's retry still takes a fresh baseline
+    const errorBranch = fetchEffect.slice(elseStart, fetchEffect.indexOf("setResults(", elseStart));
+    expect(errorBranch).not.toContain("refreshing.current.delete");
+  });
+
+  it("prunes the new refs with the others when a follow is unfollowed", () => {
+    expect(fetchEffect).toContain("if (!live.has(key)) settledAt.current.delete(key);");
+    expect(fetchEffect).toContain("if (!live.has(key)) refreshing.current.delete(key);");
+  });
+
+  it("the fetch effect keeps its deps (a re-entry must not add a dependency that refetches on every change)", () => {
+    expect(src).toContain("}, [keysSignature, retryNonce]);");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-follows-3: the second tap of a double tap on X lands on the next follow.
+// ---------------------------------------------------------------------------
+
+describe("handleRemove is idempotent per follow and guarded against a slid-under tap (source guard) [h201-follows-3]", () => {
+  const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
+  const start = src.indexOf("function handleRemove");
+  const handleRemove = src.slice(start, src.indexOf("\n  }\n", start));
+
+  it("slices the code it is guarding", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(handleRemove).toContain("remove(key)");
+  });
+
+  it("holds one guard per feed in a ref", () => {
+    expect(src).toContain("removeGuard = useRef(createRemoveGuard())");
+  });
+
+  it("plans the removal from the STORE's current keys (not the render's list) and stops when the plan is null", () => {
+    expect(handleRemove).toContain(
+      "const plan = planFollowRemoval(followsStore.read().map(followKey), key, removeGuard.current, nowMs());",
+    );
+    expect(handleRemove).toContain("if (plan === null) return;");
+    expect(handleRemove).not.toContain("follows.map(followKey)");
+  });
+
+  it("announces, hands focus over and removes only after the plan said yes, in that order", () => {
+    const planned = handleRemove.indexOf("if (plan === null) return;");
+    const focus = handleRemove.indexOf("pendingFocus.current = plan.focus;");
+    const say = handleRemove.indexOf("setAnnouncement(");
+    const remove = handleRemove.indexOf("remove(key)");
+    expect(planned).toBeGreaterThan(-1);
+    expect(focus).toBeGreaterThan(planned);
+    expect(say).toBeGreaterThan(planned);
+    expect(remove).toBeGreaterThan(focus);
+    expect(remove).toBeGreaterThan(say);
   });
 });

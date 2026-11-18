@@ -563,13 +563,16 @@ describe("followsStore", () => {
     const store = await loadStore();
     store.toggle("q", "bir iki");
     store.toggle("konu", "spor");
+    // The device clock moves on, but the stamp comes from the rows (a server instant).
     vi.setSystemTime(new Date("2026-10-22T12:00:00.000Z"));
     const id = "aaaaaaaa-1111-4111-8111-000000000001";
-    store.markSeen(new Map([["konu:spor", { ids: [id], floor: "2026-10-22T07:00:00+00:00" }]]));
+    store.markSeen(
+      new Map([["konu:spor", { ids: [id], floor: "2026-10-22T07:00:00+00:00", at: "2026-10-22T08:50:00.000Z" }]]),
+    );
     const [first, second] = store.read();
     expect(first?.seenAt).toBe("2026-10-22T09:00:00.000Z");
     expect(first?.seenIds).toBeNull();
-    expect(second?.seenAt).toBe("2026-10-22T12:00:00.000Z");
+    expect(second?.seenAt).toBe("2026-10-22T08:50:00.000Z");
     // h112-follows-1: the rows the visit showed are stored with the stamp, and persisted
     expect(second?.seenIds).toEqual([id]);
     expect(second?.seenFloor).toBe("2026-10-22T07:00:00+00:00");
@@ -579,6 +582,52 @@ describe("followsStore", () => {
     store.markSeen(new Map([["q:yok boyle", { ids: [id], floor: "2026-10-22T07:00:00+00:00" }]]));
     store.markSeen(new Map());
     expect(h.setItem).not.toHaveBeenCalled();
+  });
+
+  // h201-follows-1: the visit's baseline is a server instant. A device clock that
+  // is hours off (here: 2031) must never reach seenAt.
+  it("markSeen never stamps the device clock: rows without a stamp store null, an explicit server instant is used as given", async () => {
+    const store = await loadStore();
+    store.toggle("konu", "spor");
+    store.toggle("konu", "ekonomi");
+    vi.setSystemTime(new Date("2031-05-05T05:05:05.000Z"));
+    const id = "aaaaaaaa-1111-4111-8111-000000000001";
+    const rows = { ids: [id], floor: "2026-10-22T07:00:00+00:00" };
+    store.markSeen(new Map([["konu:spor", rows]]));
+    expect(store.read()[0]?.seenAt).toBeNull();
+    store.markSeen(new Map([["konu:ekonomi", rows]]), "2026-10-22T09:05:00.000Z");
+    expect(store.read()[1]?.seenAt).toBe("2026-10-22T09:05:00.000Z");
+    expect(h.storage.get(FOLLOWS_KEY)).not.toContain("2031");
+  });
+
+  it("an empty visit stores the response's instant and goes back to the seenAt rule", async () => {
+    const store = await loadStore();
+    store.toggle("konu", "spor");
+    vi.setSystemTime(new Date("2001-01-01T00:00:00.000Z"));
+    store.markSeen(new Map([["konu:spor", { ids: [], floor: null, at: "2026-10-22T09:58:00.000Z" }]]));
+    expect(store.read()[0]).toMatchObject({
+      seenAt: "2026-10-22T09:58:00.000Z",
+      seenIds: null,
+      seenFloor: null,
+    });
+  });
+
+  // h201-follows-3: remove is idempotent per key, and says whether it removed.
+  it("remove reports whether the follow existed: a second removal of the same key is a no-op", async () => {
+    const store = await loadStore();
+    store.toggle("q", "bir iki");
+    store.toggle("konu", "spor");
+    const onChange = vi.fn();
+    store.subscribe(onChange);
+    h.setItem.mockClear();
+
+    expect(store.remove("q:bir iki")).toBe(true);
+    expect(store.remove("q:bir iki")).toBe(false);
+    expect(store.remove("q:yok boyle")).toBe(false);
+    expect(store.read().map((f) => `${f.kind}:${f.value}`)).toEqual(["konu:spor"]);
+    // one write and one notification: the repeats touched nothing
+    expect(h.setItem).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   // h112-follows-2: 'IMF' and 'imf' (and a legacy stored 'ımf') are one follow.

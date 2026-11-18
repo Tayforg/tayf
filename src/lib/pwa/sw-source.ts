@@ -606,7 +606,23 @@ async function handleNavigate(event) {
   }
 }
 
-async function precacheShell() {
+// Single-flight (SW-1): install and every tayf:sync message end up here, and two of them can overlap (two tabs, or
+// a sync during install). Two concurrent runs would each fetch /offline and write the shell, and a partial run could
+// then put back the previous deploy's html after a concurrent successful run had already pruned that deploy's
+// assets. Overlapping callers share the one run in flight, success or failure alike, and the slot is freed in
+// finally, so the next caller after it settled (a retry after a failure included) starts a fresh run.
+let shellRun = null;
+
+function precacheShell() {
+  if (shellRun === null) {
+    shellRun = runPrecacheShell().finally(function () {
+      shellRun = null;
+    });
+  }
+  return shellRun;
+}
+
+async function runPrecacheShell() {
   const res = await fetch(OFFLINE_URL, { cache: "no-cache" });
   if (!isCacheableResponse(res, ORIGIN, "shell")) throw new Error("offline shell is not cacheable");
   const html = await res.text();

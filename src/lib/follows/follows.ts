@@ -394,9 +394,12 @@ export function serializeFollows(list: readonly Follow[]): string {
 }
 
 /**
- * Adds a follow. A new entry starts with addedAt = seenAt = nowIso, so only
- * stories first published AFTER the follow count as "yeni", and with no seen ids
- * (it uses the seenAt rule until its first /takip visit records some). Check order:
+ * Adds a follow. A new entry starts with addedAt = seenAt = nowIso and no seen
+ * ids. `nowIso` is the reader's DEVICE clock and is informational only: it is
+ * never compared with a server timestamp. followBaseline treats that untouched
+ * pair as "no baseline" (h201-follows-1), so the first /takip visit shows no
+ * "yeni" and records the real baseline (a server instant plus the rows' ids).
+ * Check order:
  * invalid, then exists (an already-followed entry in a full list is "exists",
  * not "full"), then full. On any non-"added" result `list` is the input.
  */
@@ -469,29 +472,74 @@ export type SeenRows = {
   ids: readonly string[];
   /** null when no rendered row has a readable time (an empty result). */
   floor: string | null;
+  /**
+   * The visit's SERVER instant (h201-follows-1): the response's Date header or
+   * the newest updatedAt of the rows shown, whichever is later (rowsShown). It is
+   * what markSeen stores as seenAt, so the seenAt rule never compares a server
+   * timestamp with the reader's device clock. Absent / null = no server instant.
+   */
+  at?: string | null;
 };
 
 /**
- * Records a visit for exactly the given keys: seenAt = nowIso, plus the ids and
- * the floor of the rows that were actually rendered (rowsShown). Every other
- * entry is untouched. Rows that give no usable record (an empty result, an
- * unreadable floor) reset seenIds / seenFloor to null, so that follow uses the
- * seenAt rule, which is exactly "nothing was on screen".
+ * Records a visit for exactly the given keys: seenAt = the rows' own server
+ * stamp (SeenRows.at), else `serverNowIso`, else null -- NEVER the device clock
+ * (h201-follows-1: a clock that is hours off invented "yeni" badges or hid them).
+ * Also stores the ids and the floor of the rows that were actually rendered
+ * (rowsShown). Every other entry is untouched. Rows that give no usable record
+ * (an empty result, an unreadable floor) reset seenIds / seenFloor to null, so
+ * that follow uses the seenAt rule, which is exactly "nothing was on screen". A
+ * null seenAt is a follow without a baseline: nothing counts as new until the
+ * next visit records one.
  */
 export function markSeen(
   list: readonly Follow[],
   shown: ReadonlyMap<string, SeenRows>,
-  nowIso: string,
+  serverNowIso: string | null = null,
 ): Follow[] {
+  const fallback = cleanStamp(serverNowIso);
   return list.map((f) => {
     const rows = shown.get(followKey(f));
     if (rows === undefined) return f;
+    const seenAt = cleanStamp(rows.at) ?? fallback;
     const ids = distinctIds(rows.ids);
     const floorOk = rows.floor !== null && cleanStamp(rows.floor) !== null;
     return ids.length > 0 && floorOk
-      ? { ...f, seenAt: nowIso, seenIds: ids, seenFloor: rows.floor }
-      : { ...f, seenAt: nowIso, seenIds: null, seenFloor: null };
+      ? { ...f, seenAt, seenIds: ids, seenFloor: rows.floor }
+      : { ...f, seenAt, seenIds: null, seenFloor: null };
   });
+}
+
+/**
+ * An HTTP Date header (or any ISO instant) as the ISO instant a baseline stores,
+ * or null when it is not a readable instant. The one way a SERVER time enters the
+ * client: a response's Date header. Never a guess and never the device clock.
+ */
+export function serverInstant(v: unknown): string | null {
+  if (typeof v !== "string" || v.length === 0 || v.length > 64) return null;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/**
+ * The newest server instant a visit can vouch for: the response's own instant
+ * and the updatedAt of the rows actually shown (a database stamp), whichever is
+ * latest; firstPublished (feed-supplied, so possibly misdated) only when nothing
+ * else is readable. null when the visit has no server instant at all.
+ */
+function newestServerStamp(
+  rows: ReadonlyArray<{ firstPublished: string; updatedAt?: string }>,
+  serverNowIso: string | null | undefined,
+): string | null {
+  const stamps: number[] = [];
+  const push = (v: unknown) => {
+    const ms = typeof v === "string" ? Date.parse(v) : Number.NaN;
+    if (Number.isFinite(ms)) stamps.push(ms);
+  };
+  push(serverNowIso);
+  for (const row of rows) push(row.updatedAt);
+  if (stamps.length === 0) for (const row of rows) push(row.firstPublished);
+  return stamps.length === 0 ? null : new Date(Math.max(...stamps)).toISOString();
 }
 
 /** What isNewItem needs from a follow: its last visit (when, which stories, the oldest of them). */
@@ -599,9 +647,10 @@ export function followRowsToShow(
  * shown, never the rest of the response.
  */
 export function rowsShown(
-  items: ReadonlyArray<{ id: string; firstPublished: string }>,
+  items: ReadonlyArray<{ id: string; firstPublished: string; updatedAt?: string }>,
   baseline: SeenBaseline | string | null,
   base: number,
+  serverNowIso?: string | null,
 ): SeenRows {
   const rows = items.slice(0, followRowsToShow(items, baseline, base));
   let floor: string | null = null;
@@ -613,7 +662,125 @@ export function rowsShown(
       floor = row.firstPublished;
     }
   }
-  return { ids: rows.map((r) => r.id), floor };
+  return { ids: rows.map((r) => r.id), floor, at: newestServerStamp(rows, serverNowIso) };
+}
+
+/**
+ * The baseline a /takip visit judges "yeni" against, from a stored follow
+ * (h201-follows-1). addFollow stamps a new follow with addedAt = seenAt = the
+ * reader's DEVICE clock. Until a visit replaces it (the visit stores a server
+ * instant and the rows' ids, see markSeen) that stamp is the only baseline, and
+ * isNewItem would compare it with a server timestamp: a clock 3 h behind turned
+ * the previous 3 h of stories into "yeni", a clock 2 h ahead hid the next 2 h.
+ * So a follow that has recorded no rows (seenIds null) and whose seenAt is still
+ * exactly its addedAt has NO baseline: nothing is new on its first visit, and
+ * that visit records the real one. Every other follow keeps what it stored.
+ * (A stamp written by an older build after an empty visit cannot be told from a
+ * server one; the next visit rewrites it.)
+ */
+export function followBaseline(
+  f: Pick<Follow, "addedAt" | "seenAt" | "seenIds" | "seenFloor">,
+): SeenBaseline {
+  const deviceStamp = f.seenIds === null && f.addedAt !== null && f.seenAt === f.addedAt;
+  return { seenAt: deviceStamp ? null : f.seenAt, seenIds: f.seenIds, seenFloor: f.seenFloor };
+}
+
+/** The follow's CURRENT stored baseline (followBaseline) by key; NO_BASELINE when it is not in the list. */
+export function followBaselineOf(list: readonly Follow[], key: string): SeenBaseline {
+  const f = list.find((x) => followKey(x) === key);
+  return f === undefined ? NO_BASELINE : followBaseline(f);
+}
+
+// ---------------------------------------------------------------------------
+// Re-entry of a preserved /takip (h201-follows-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a loaded list counts as fresh when the reader comes back to a
+ * preserved /takip: the 60 s max-age of GET /api/takip, so a refetch before that
+ * would be answered by the browser's own cache anyway.
+ */
+export const FOLLOW_REFRESH_AFTER_MS = 60_000;
+/**
+ * A failed follow is retried on re-entry once its failure is this old. The
+ * cool-down keeps a reader who bounces between pages from hammering a 429.
+ */
+export const FOLLOW_RETRY_AFTER_MS = 10_000;
+
+/** When a follow's last fetch settled (a device-clock reading, only ever used as a duration) and how. */
+export type FollowSettle = { at: number; ok: boolean };
+
+/**
+ * The follows a re-entered /takip must fetch again, in the log's order: lists
+ * that are stale (FOLLOW_REFRESH_AFTER_MS) and failures past their cool-down
+ * (FOLLOW_RETRY_AFTER_MS). Everything else keeps what is on screen, so a quick
+ * Back refetches nothing. A settle stamped in the future (the clock moved back)
+ * or unreadable cannot say how old the answer is, so it is due.
+ */
+export function followKeysDueOnReentry(
+  settled: ReadonlyMap<string, FollowSettle>,
+  now: number,
+): string[] {
+  const due: string[] = [];
+  for (const [key, s] of settled) {
+    const age = now - s.at;
+    const window = s.ok ? FOLLOW_REFRESH_AFTER_MS : FOLLOW_RETRY_AFTER_MS;
+    if (!Number.isFinite(age) || age < 0 || age >= window) due.push(key);
+  }
+  return due;
+}
+
+// ---------------------------------------------------------------------------
+// Unfollowing from /takip (h201-follows-3)
+// ---------------------------------------------------------------------------
+
+/** A removal within this long of the previous one is ignored (the slid-under second tap of a double tap). */
+export const REMOVE_GUARD_MS = 400;
+
+export interface RemoveGuard {
+  /** True (and the window starts) when a removal may go ahead at `now`; false while the previous removal's window is open. */
+  allow(key: string, now: number): boolean;
+}
+
+/**
+ * Tapping X twice removed two follows: the first removal commits synchronously,
+ * the next follow's header slides into the same slot, and the second tap lands
+ * on ITS X. The window runs from the last removal that went through; ignored taps
+ * do not extend it. A clock that moved back (now before the last removal) opens
+ * the guard instead of locking it. `key` is accepted so a removal is judged per
+ * follow by the caller (planFollowRemoval); the window itself covers every key.
+ */
+export function createRemoveGuard(windowMs: number = REMOVE_GUARD_MS): RemoveGuard {
+  let lastAt: number | null = null;
+  return {
+    allow(_key, now) {
+      if (lastAt !== null) {
+        const since = now - lastAt;
+        if (since >= 0 && since < windowMs) return false;
+      }
+      lastAt = now;
+      return true;
+    },
+  };
+}
+
+/**
+ * What a tap on a follow's X does, or null when it must do nothing: the follow is
+ * no longer in `keys` (the earlier tap or another tab removed it: removal is
+ * idempotent per follow, and such a tap neither starts the guard's window nor
+ * clobbers a pending focus target), or the guard says the previous removal is too
+ * recent. `keys` are the follows in display order, read from the store right
+ * now. Otherwise the follow that should take focus (focusTargetAfterRemove).
+ */
+export function planFollowRemoval(
+  keys: readonly string[],
+  key: string,
+  guard: RemoveGuard,
+  now: number,
+): { focus: string | null } | null {
+  if (!keys.includes(key)) return null;
+  if (!guard.allow(key, now)) return null;
+  return { focus: focusTargetAfterRemove(keys, key) };
 }
 
 export function followHref(f: Pick<Follow, "kind" | "value">): string {
