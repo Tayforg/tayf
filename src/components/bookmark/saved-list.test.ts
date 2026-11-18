@@ -6,7 +6,15 @@ import { describe, expect, it } from "vitest";
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 
-import { SAVED_LOAD_FAILED_TEXT, SavedEmptyState, SavedFrame, SavedList, SavedLoadFailed } from "./saved-list";
+import {
+  REMOVE_REPEAT_WINDOW_MS,
+  SAVED_LOAD_FAILED_TEXT,
+  SavedEmptyState,
+  SavedFrame,
+  SavedList,
+  SavedLoadFailed,
+  isRepeatRemoval,
+} from "./saved-list";
 import { toSavedRowView } from "./saved-row";
 
 // Source guard (same approach as framing-game.test.tsx): saved-list.tsx must
@@ -714,23 +722,45 @@ describe("saved-list.tsx focus handoff and announcements", () => {
     expect(component).not.toContain("onClick={() => toggle(row.id)}");
   });
 
-  it("handleRemove records the focus target before it toggles the bookmark", () => {
+  it("handleRemove records the focus target before it removes the bookmark", () => {
     const from = component.indexOf("function handleRemove");
     expect(from).toBeGreaterThan(-1);
     const body = component.slice(from, component.indexOf("\n  }\n", from));
     const pendingAt = body.indexOf("pendingFocus.current = focusTargetAfterRemove(");
     const announceAt = body.indexOf("setAnnouncement(");
-    const toggleAt = body.indexOf("toggle(row.id)");
+    const removeAt = body.indexOf("remove(row.id)");
     expect(pendingAt).toBeGreaterThan(-1);
     expect(announceAt).toBeGreaterThan(-1);
-    expect(toggleAt).toBeGreaterThan(pendingAt);
-    expect(toggleAt).toBeGreaterThan(announceAt);
+    expect(removeAt).toBeGreaterThan(pendingAt);
+    expect(removeAt).toBeGreaterThan(announceAt);
     // The row leaves the list at once, so focus does not wait for the RPC.
     expect(body).toContain("setRows(");
   });
 
-  it("toggle( is called nowhere else", () => {
-    expect(component.match(/\btoggle\(/g)).toHaveLength(1);
+  // h201: the X went through toggle, which ADDS an id that is not in its render-time snapshot (a
+  // row another tab already removed would come back). remove(id) only ever removes.
+  it("removes through the explicit remove(id) of the hook and never through toggle", () => {
+    expect(component).toMatch(/const \{[^}]*\bremove\b[^}]*\} = useBookmarks\(\);/);
+    expect(component).not.toMatch(/\btoggle\b/);
+    expect(component.match(/\bremove\(/g)).toHaveLength(1);
+  });
+
+  it("handleRemove ignores a repeat activation before it touches focus, the announcement, the rows or the store", () => {
+    const from = component.indexOf("function handleRemove");
+    const body = component.slice(from, component.indexOf("\n  }\n", from));
+    const guardAt = body.indexOf("isRepeatRemoval(");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(body.indexOf("pendingFocus.current ="));
+    expect(guardAt).toBeLessThan(body.indexOf("setAnnouncement("));
+    expect(guardAt).toBeLessThan(body.indexOf("setRows("));
+    expect(guardAt).toBeLessThan(body.indexOf("remove(row.id)"));
+    expect(body).toMatch(/lastRemovalAt\.current\s*=/);
+    // The gap between two taps is measured on the monotonic clock; the page's one Date.now() stays in the effect.
+    expect(body).toContain("performance.now()");
+    expect(body).not.toContain("Date.now");
+    // The marker is a ref declared with the other hooks, above every early return.
+    expect(component.indexOf("lastRemovalAt = useRef")).toBeGreaterThan(-1);
+    expect(component.indexOf("lastRemovalAt = useRef")).toBeLessThan(component.indexOf("\n  if ("));
   });
 
   it("every JSX return path of SavedList is wrapped in SavedFrame, so the live region never remounts", () => {
@@ -846,5 +876,39 @@ describe("saved-list.tsx focus handoff and announcements", () => {
     expect(frameAt).toBeGreaterThan(-1);
     expect(frame).not.toContain("<Link");
     expect(frame).not.toContain("<button");
+  });
+});
+
+// h201: tapping X twice quickly removed two stories. The first tap drops the row at once, the next row
+// slides under the pointer and the second tap lands on its X. Idempotent remove(id) cannot stop that (the
+// second tap is a different id), so the page ignores a removal that follows another within a short window.
+describe("isRepeatRemoval", () => {
+  it("has a window of about 400 ms, the span of a double tap", () => {
+    expect(REMOVE_REPEAT_WINDOW_MS).toBe(400);
+  });
+
+  it("lets the first removal through", () => {
+    expect(isRepeatRemoval(null, 1_000)).toBe(false);
+    expect(isRepeatRemoval(null, 0)).toBe(false);
+  });
+
+  it("ignores a removal that follows another inside the window", () => {
+    expect(isRepeatRemoval(1_000, 1_000)).toBe(true);
+    expect(isRepeatRemoval(1_000, 1_001)).toBe(true);
+    expect(isRepeatRemoval(1_000, 1_000 + REMOVE_REPEAT_WINDOW_MS - 1)).toBe(true);
+  });
+
+  it("lets a removal through once the window has passed", () => {
+    expect(isRepeatRemoval(1_000, 1_000 + REMOVE_REPEAT_WINDOW_MS)).toBe(false);
+    expect(isRepeatRemoval(1_000, 5_000)).toBe(false);
+  });
+
+  it("never blocks on a clock that went backwards", () => {
+    expect(isRepeatRemoval(5_000, 1_000)).toBe(false);
+  });
+
+  it("treats a non-finite timestamp as no earlier removal", () => {
+    expect(isRepeatRemoval(Number.NaN, 1_000)).toBe(false);
+    expect(isRepeatRemoval(1_000, Number.NaN)).toBe(false);
   });
 });

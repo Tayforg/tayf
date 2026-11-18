@@ -66,7 +66,7 @@ describe("FramingGame — static render (idle phase)", () => {
 });
 
 describe("FramingGame — source guard: a late vote response cannot overwrite a newer headline's tally [stale tally]", () => {
-  it("records the entry unconditionally, then guards setLastTally/setAnnouncement on headlineIdRef", () => {
+  it("records the entry regardless of the headline (but only for its own round, h201-game-2), then guards setLastTally/setAnnouncement on headlineIdRef", () => {
     const handleVoteStart = source.indexOf("const handleVote = useCallback(");
     const handleVoteEnd = source.indexOf("const handleNext = useCallback(");
     expect(handleVoteStart).toBeGreaterThan(-1);
@@ -96,6 +96,28 @@ describe("FramingGame — source guard: a late vote response cannot overwrite a 
       'setHeadline({ articleId: outcome.articleId, title: outcome.title });\n      headlineIdRef.current = outcome.articleId;',
     );
     expect(source).toContain("setHeadline(null);\n    headlineIdRef.current = null;");
+  });
+});
+
+describe("FramingGame — source guard: a vote response is tied to the round it was cast in [h201-game-2]", () => {
+  const handleVoteStart = source.indexOf("const handleVote = useCallback(");
+  const handleVoteEnd = source.indexOf("const handleNext = useCallback(");
+  const voteBody = source.slice(handleVoteStart, handleVoteEnd);
+
+  it("handleStart bumps the round counter, handleVote captures it before the POST", () => {
+    const startAt = source.indexOf("const handleStart = useCallback(");
+    const startEnd = source.indexOf("// Single round-long countdown");
+    expect(source).toContain("const roundRef = useRef(0);");
+    expect(source.slice(startAt, startEnd)).toContain("roundRef.current += 1;");
+    expect(voteBody.indexOf("const round = roundRef.current;")).toBeGreaterThan(-1);
+    expect(voteBody.indexOf("const round = roundRef.current;")).toBeLessThan(voteBody.indexOf("fetch("));
+  });
+
+  it("both the .then and the .catch drop a response whose round is over, before recordEntry", () => {
+    const guard = "if (roundRef.current !== round) return;";
+    expect(voteBody.split(guard)).toHaveLength(3);
+    expect(voteBody.indexOf(guard)).toBeLessThan(voteBody.indexOf("recordEntry({ vote, tally });"));
+    expect(voteBody.lastIndexOf(guard)).toBeLessThan(voteBody.indexOf("recordEntry({ vote, tally: EMPTY_TALLY });"));
   });
 });
 

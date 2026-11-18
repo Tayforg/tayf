@@ -1518,6 +1518,145 @@ describe("shell precache when an asset download fails", () => {
   });
 });
 
+// SW-1 (PR #301 review): precacheShell was not single-flight. Two overlapping runs (two tabs posting tayf:sync, or a
+// sync during install) each fetched /offline and wrote the shell; a partial run could then re-put the previous
+// deploy's html after a concurrent successful run had already pruned that deploy's assets. Overlapping callers now
+// share ONE run, and the slot is free again as soon as it settles (also when it failed).
+describe("shell precache is single-flight (SW-1)", () => {
+  const sync = (w: LoadedWorker) => w.dispatchMessage({ type: "tayf:sync", ids: [] });
+  const offlineFetches = (w: LoadedWorker) =>
+    w.fetch.mock.calls.filter((c) => urlString(c[0]) === OFFLINE_KEY).length;
+  const fetchCount = (w: LoadedWorker, url: string) =>
+    w.fetch.mock.calls.filter((c) => urlString(c[0]) === url).length;
+
+  /**
+   * `base` (shellAwareFetch by default) with the /offline answer held until `release()`, so overlapping callers
+   * really overlap. With `failOffline` the held answer then throws (a dropped connection) instead of answering.
+   */
+  function gatedOffline(base: FetchImpl = shellAwareFetch(), failOffline = false) {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const impl: FetchImpl = async (input, init) => {
+      if (urlString(input) === OFFLINE_KEY) {
+        await gate;
+        if (failOffline) throw new TypeError("offline");
+      }
+      return base(input, init);
+    };
+    return { impl, release };
+  }
+
+  it("two concurrent tayf:sync messages over an expired shell fetch /offline exactly once", async () => {
+    const { impl, release } = gatedOffline();
+    const w = load(impl);
+    await seedShell(w, iso(SHELL_MAX_AGE + HOUR)); // expired: every sync wants a refresh
+
+    const t0 = Date.now();
+    const first = sync(w);
+    const second = sync(w);
+    // Both runs are past the expiry check and waiting on the same held /offline answer.
+    await vi.waitFor(() => expect(offlineFetches(w)).toBeGreaterThanOrEqual(1));
+    await sleep(30);
+    release();
+    await Promise.all([first, second]);
+    const t1 = Date.now();
+
+    expect(offlineFetches(w)).toBe(1);
+    expect(fetchCount(w, ASSET_A)).toBe(1);
+    expect(fetchCount(w, ASSET_B)).toBe(1);
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OFFLINE_HTML);
+    expectFullStamp(await shellStamp(w), t0, t1);
+  });
+
+  it("a sync that overlaps the install shares its run (one /offline fetch, install still skipWaitings)", async () => {
+    const { impl, release } = gatedOffline();
+    const w = load(impl);
+
+    const install = w.dispatchInstall();
+    await vi.waitFor(() => expect(offlineFetches(w)).toBe(1));
+    const overlapping = sync(w); // no shell yet: sync wants to precache too
+    await sleep(30);
+    release();
+    await Promise.all([install, overlapping]);
+
+    expect(offlineFetches(w)).toBe(1);
+    expect(w.skipWaiting).toHaveBeenCalledTimes(1);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_A, ASSET_B, OFFLINE_KEY].sort());
+  });
+
+  it("the slot is free once a run settles: a later sync over an expired shell runs again", async () => {
+    const w = load(shellAwareFetch());
+    await seedShell(w, iso(SHELL_MAX_AGE + HOUR));
+    await sync(w);
+    expect(offlineFetches(w)).toBe(1);
+
+    await ageShellStamp(w, SHELL_MAX_AGE + HOUR);
+    await sync(w);
+    expect(offlineFetches(w)).toBe(2);
+  });
+
+  it("a failed run frees the slot too: the next sync retries instead of reusing the failure", async () => {
+    let offlineUp = false;
+    const base = shellAwareFetch();
+    const w = load(async (input, init) => {
+      if (urlString(input) === OFFLINE_KEY && !offlineUp) throw new TypeError("offline");
+      return base(input, init);
+    });
+    await seedShell(w, iso(SHELL_MAX_AGE + HOUR));
+
+    await expect(sync(w)).resolves.toBeUndefined(); // best effort: the failure is swallowed
+    expect(offlineFetches(w)).toBe(1);
+
+    offlineUp = true;
+    await sync(w);
+    expect(offlineFetches(w)).toBe(2);
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OFFLINE_HTML);
+  });
+
+  it("overlapping callers all see a failure of the shared run (install fails once, nothing is stored)", async () => {
+    const { impl, release } = gatedOffline(shellAwareFetch(), true);
+    const w = load(impl);
+    const install = w.dispatchInstall();
+    await vi.waitFor(() => expect(offlineFetches(w)).toBe(1));
+    const overlapping = sync(w);
+    await sleep(30);
+    release();
+    await expect(install).rejects.toBeDefined();
+    await expect(overlapping).resolves.toBeUndefined();
+    expect(offlineFetches(w)).toBe(1);
+    expect(w.skipWaiting).not.toHaveBeenCalled();
+    expect(w.caches.urls(CACHE_NAMES.shell)).toEqual([]);
+  });
+
+  it("a partial shared run still keeps the previous deploy's html and assets (the SW-1 race has no second run)", async () => {
+    const OLD_A = `${ORIGIN}/_next/static/chunks/old-a.js`;
+    const OLD_HTML = [
+      "<!doctype html><title>old offline</title>",
+      '<script src="/_next/static/chunks/old-a.js" async></script>',
+    ].join("");
+    const { impl, release } = gatedOffline(failingAssets(new Set([ASSET_A])));
+    const w = load(impl);
+    await w.caches.seed(
+      CACHE_NAMES.shell,
+      OFFLINE_KEY,
+      stored(OLD_HTML, { [HEADER_CACHED_AT]: iso(SHELL_MAX_AGE + HOUR) }),
+    );
+    await w.caches.seed(CACHE_NAMES.shell, OLD_A, fakeResponse("old-a"));
+
+    const first = sync(w);
+    const second = sync(w);
+    await sleep(30);
+    release();
+    await Promise.all([first, second]);
+
+    expect(offlineFetches(w)).toBe(1);
+    expect(await w.caches.text(CACHE_NAMES.shell, OFFLINE_KEY)).toBe(OLD_HTML);
+    expect(w.caches.urls(CACHE_NAMES.shell).sort()).toEqual([ASSET_B, OFFLINE_KEY, OLD_A].sort());
+  });
+});
+
 // A partial refresh used to prune the shell cache down to the new html's asset set, discarding the assets of the
 // previous complete shell that /offline still needs. It now keeps the previous shell and prunes every key that is in
 // neither the asset set of the html stored as /offline (the previous shell, or the new html on a first install) nor

@@ -220,6 +220,12 @@ describe("OyunModes -- source guard: tabs stay mounted once opened", () => {
     expect(source).toContain("new Set(");
   });
 
+  it("keys DailyGame by the puzzle date and follows a changed initialMode (h201-game-1; behaviour in daily-game.test.tsx)", () => {
+    expect(source).toContain('key={daily?.dateKey ?? "none"}');
+    expect(source).toContain("if (seededMode !== initialMode) {");
+    expect(source).toContain("setMode(initialMode);");
+  });
+
   it("no longer switches the games with a mode ternary (which unmounted the other two)", () => {
     expect(source).not.toContain('mode === "bolge" ? (');
     expect(source).not.toContain('mode === "cerceve" ? (');

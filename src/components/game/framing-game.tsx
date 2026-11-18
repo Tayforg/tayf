@@ -90,6 +90,11 @@ export function FramingGame() {
   // when it still matches the vote's own headline — otherwise a late
   // response for a since-replaced headline would paint the wrong tally.
   const headlineIdRef = useRef<string | null>(null);
+  // Which round is running: bumped by `handleStart`. A vote POST captures it when
+  // the vote is cast and its `.then`/`.catch` only record the entry while it is
+  // still the same round, so a slow response from the previous round cannot land
+  // in the new round's entries (and the new summary).
+  const roundRef = useRef(0);
   // How many headlines this round has drawn so far: the "n." in the headline
   // announcement. The round has no fixed size, so there is no "/total".
   const drawnCountRef = useRef(0);
@@ -175,6 +180,7 @@ export function FramingGame() {
   }, [finishRound]);
 
   const handleStart = useCallback(() => {
+    roundRef.current += 1;
     entriesRef.current = [];
     setEntries([]);
     setPoolEmpty(false);
@@ -234,6 +240,7 @@ export function FramingGame() {
     (vote: FramingVote) => {
       if (!headline || phase !== "playing") return;
       const articleId = headline.articleId;
+      const round = roundRef.current;
       setLastVote(vote);
       setVoted((count) => count + 1);
       setPhase("revealed");
@@ -247,8 +254,12 @@ export function FramingGame() {
           if (!res.ok) throw new Error("vote rejected");
           const payload = (await res.json()) as VotePayload;
           const tally = normalizeTally(payload.totals);
-          // `recordEntry` stays unconditional — entry A is a legitimate
-          // round entry regardless of which headline is now displayed.
+          // A response from a previous round (the player restarted while this
+          // POST was in flight) belongs to nobody now: drop it entirely.
+          if (roundRef.current !== round) return;
+          // Within its own round `recordEntry` stays unconditional on the
+          // headline — entry A is a legitimate round entry regardless of
+          // which headline is now displayed.
           recordEntry({ vote, tally });
           // But only paint the tally/announcement when the on-screen
           // headline is still the one this vote was cast for — a late
@@ -262,7 +273,9 @@ export function FramingGame() {
           // A failed vote still advances the round — recorded locally
           // with an n:0 tally (unscored, not "wrong"). Never interrupt
           // play on a network failure, matching /api/oyun's fire-and
-          // -forget stance, except here we still need a local entry.
+          // -forget stance, except here we still need a local entry. Only
+          // for the round the vote was cast in (see the .then above).
+          if (roundRef.current !== round) return;
           recordEntry({ vote, tally: EMPTY_TALLY });
           if (headlineIdRef.current === articleId) {
             setLastTally(EMPTY_TALLY);

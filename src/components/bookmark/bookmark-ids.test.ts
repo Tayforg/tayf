@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   normaliseBookmarkId,
   normaliseBookmarkIds,
+  removeBookmarkId,
   toggleBookmarkId,
 } from "@/components/bookmark/bookmark-ids";
 
@@ -138,5 +139,51 @@ describe("toggleBookmarkId", () => {
     const result = toggleBookmarkId(new Set<string>(), "Legacy-1");
     expect(result?.key).toBe("legacy-1");
     expect(result?.added).toBe(true);
+  });
+});
+
+// h201: the /saved X used to go through toggleBookmarkId, which ADDS when the id is
+// absent. A removal must only ever remove: a second tap on the same id (or a row that
+// another tab already removed) is a no-op, never a re-add.
+describe("removeBookmarkId", () => {
+  it("removes a present id and reports the canonical key", () => {
+    const result = removeBookmarkId(new Set<string>(["a", LOWER, "b"]), UPPER);
+    expect(result).not.toBeNull();
+    expect(result?.added).toBe(false);
+    expect(result?.key).toBe(LOWER);
+    expect(Array.from(result?.next ?? [])).toEqual(["a", "b"]);
+  });
+
+  it("returns null, never an add, when the id is absent", () => {
+    expect(removeBookmarkId(new Set<string>(), LOWER)).toBeNull();
+    expect(removeBookmarkId(new Set<string>(["a"]), "b")).toBeNull();
+  });
+
+  it("is idempotent: removing the same id from the result of a removal is a no-op", () => {
+    const first = removeBookmarkId(new Set<string>(["a", "b"]), "a");
+    expect(Array.from(first?.next ?? [])).toEqual(["b"]);
+    expect(removeBookmarkId(first?.next ?? new Set<string>(), "a")).toBeNull();
+  });
+
+  it("returns null for an empty or non-string id", () => {
+    expect(removeBookmarkId(new Set(["a"]), "")).toBeNull();
+    expect(removeBookmarkId(new Set(["a"]), "   ")).toBeNull();
+    expect(removeBookmarkId(new Set(["a"]), undefined as unknown as string)).toBeNull();
+    expect(removeBookmarkId(new Set(["a"]), 7 as unknown as string)).toBeNull();
+  });
+
+  it("does not mutate the set it is given", () => {
+    const stored = new Set<string>([LOWER, "b"]);
+    const result = removeBookmarkId(stored, UPPER);
+    expect(Array.from(stored)).toEqual([LOWER, "b"]);
+    expect(result?.next).not.toBe(stored);
+  });
+
+  it("removes only the one id, even from a large list", () => {
+    const stored = new Set<string>(Array.from({ length: 10_000 }, (_, i) => `id-${i}`));
+    const result = removeBookmarkId(stored, "ID-5000");
+    expect(result?.next.size).toBe(9_999);
+    expect(result?.next.has("id-5000")).toBe(false);
+    expect(result?.next.has("id-5001")).toBe(true);
   });
 });

@@ -112,25 +112,36 @@ export const followsStore = {
       commit(removeFollow(current, key));
       return "removed";
     }
+    // The stamp is the DEVICE clock and informational only: followBaseline
+    // ignores an untouched addedAt === seenAt pair, so it is never compared with
+    // a server timestamp (h201-follows-1).
     const { list, result } = addFollow(current, canonical, new Date().toISOString());
     if (result === "added") commit(list);
     return result;
   },
 
-  remove(key: string): void {
-    commit(removeFollow(readList(), key));
+  /**
+   * Removes a follow by key. Idempotent (h201-follows-3): true only when the
+   * follow existed, so a repeated tap or a removal already made by another tab
+   * is a no-op that writes and notifies nothing.
+   */
+  remove(key: string): boolean {
+    const current = readList();
+    const next = removeFollow(current, key);
+    if (next.length === current.length) return false;
+    commit(next);
+    return true;
   },
 
   /**
    * Records a /takip visit for the given follows (key -> the rows rendered for
-   * it): seenAt = nowIso plus those rows' ids and oldest firstPublished.
+   * it): the rows' ids and oldest firstPublished, plus seenAt = the rows' own
+   * SERVER stamp (SeenRows.at), else `serverNowIso`, else null. Never the device
+   * clock (h201-follows-1).
    */
-  markSeen(
-    shown: ReadonlyMap<string, SeenRows>,
-    nowIso: string = new Date().toISOString(),
-  ): void {
+  markSeen(shown: ReadonlyMap<string, SeenRows>, serverNowIso: string | null = null): void {
     if (shown.size === 0) return;
-    commit(markSeenIn(readList(), shown, nowIso));
+    commit(markSeenIn(readList(), shown, serverNowIso));
   },
 
   /**
@@ -164,8 +175,8 @@ export function useFollows() {
   );
   const remove = useCallback((key: string) => followsStore.remove(key), []);
   const markSeen = useCallback(
-    (shown: ReadonlyMap<string, SeenRows>, nowIso?: string) =>
-      followsStore.markSeen(shown, nowIso),
+    (shown: ReadonlyMap<string, SeenRows>, serverNowIso?: string | null) =>
+      followsStore.markSeen(shown, serverNowIso),
     [],
   );
 

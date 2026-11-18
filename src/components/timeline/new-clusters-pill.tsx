@@ -13,6 +13,7 @@ import {
   refreshOutcome,
   remainingMs,
   startHeadPolling,
+  type HeadPollingDeps,
 } from "@/lib/clusters/timeline-head";
 
 // Realtime-lite for /timeline, no Supabase Realtime. Polls the CDN-cached head
@@ -72,10 +73,115 @@ import {
 // the page's newest row; only the 50th-row floor still counts it while telling it
 // from page row 51+ moving up after an archive. See countNewClusters.
 //
+// A stale first view (h201-timeline-1): the page is a cached copy, and a first reader (or one
+// arriving after a quiet spell) can be handed a list that is hours old under "Son 24 saat". The
+// poller's first poll is a full TIMELINE_POLL_MS after mount, so such a reader would sit on the old
+// list for two minutes with no hint. On mount the newest row the page shows is therefore compared
+// with the client clock (isListStale), and when it is older than STALE_LIST_PROBE_MS one head probe
+// runs at once (startStaleProbe), through the same fetch and the same onRows as the poller, so the
+// pill appears as soon as the head knows of clusters the page lacks. The probe only feeds the count:
+// it never refreshes by itself, the click still does. A newest row is routinely 15-40 minutes old on
+// a perfectly fresh page (a cluster shows up with its second source), so the probe often runs on a
+// current list too; that costs one request to the same CDN-cached head the poller would read two
+// minutes later, and no caching config is touched.
+//
 // Hydration: the server and the first client render both emit the empty region
 // (the count is 0 until the poller has run in an effect), so nothing can
 // mismatch. The poll schedule, the "what is new" diff and the refresh verdict
 // live in @/lib/clusters/timeline-head, where they are unit-tested.
+
+/**
+ * How old the newest shown row may be before the pill probes the head at once on mount (15 min).
+ * A visible cluster usually carries a first_published 15-40 min behind the clock, so this is a
+ * cheap "is this list plainly out of date" check, not a freshness guarantee.
+ */
+export const STALE_LIST_PROBE_MS = 15 * 60_000;
+
+/**
+ * Whether a list whose newest row was first published at `newestPublished` is old enough, at
+ * `nowMs`, to deserve an immediate head probe: strictly more than STALE_LIST_PROBE_MS behind the
+ * clock. An empty page (`null`) has nothing to trust, so it counts as stale. A newest row in the
+ * future (a client clock that runs behind), an unparseable timestamp or a non-finite clock reading
+ * cannot be judged and are not stale: the poller still covers them. Pure.
+ */
+export function isListStale(newestPublished: string | null, nowMs: number): boolean {
+  if (!Number.isFinite(nowMs)) return false;
+  if (newestPublished === null) return true;
+  const newest = Date.parse(newestPublished);
+  if (!Number.isFinite(newest)) return false;
+  return nowMs - newest > STALE_LIST_PROBE_MS;
+}
+
+/**
+ * One head probe at mount for a stale list (see isListStale), instead of waiting TIMELINE_POLL_MS
+ * for the poller's first poll. It takes the poller's own dependencies, so the fetch and the
+ * `onRows` that counts are the very same ones: nothing is duplicated, and a probe result is
+ * judged against the page exactly like a poll result.
+ *
+ * - Judged once, at start, against `deps.now()`. A fresh list starts nothing at all.
+ * - A hidden tab never fetches (the poller's rule too): the probe waits for the first change to
+ *   visible and then runs, once.
+ * - A failed request (`{ ok: false }` or a rejection) is dropped silently; the poller's own
+ *   cadence and backoff are not involved.
+ * - It only hands rows to `onRows` (a throwing one is swallowed): it never refreshes the page.
+ * - Returns `stop`: aborts the request in flight (its result is dropped), unsubscribes. Idempotent.
+ */
+export function startStaleProbe(
+  deps: Pick<HeadPollingDeps, "fetchHead" | "onRows" | "isVisible" | "subscribeVisibility" | "now">,
+  newestPublished: string | null,
+): () => void {
+  if (!isListStale(newestPublished, deps.now())) return () => {};
+
+  let stopped = false;
+  let started = false;
+  let controller: AbortController | null = null;
+  let unsubscribe: (() => void) | null = null;
+
+  function run(): void {
+    if (stopped || started) return;
+    started = true;
+    if (unsubscribe !== null) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    const mine = new AbortController();
+    controller = mine;
+    deps.fetchHead(mine.signal).then(
+      (result) => {
+        if (stopped || controller !== mine || !result.ok) return;
+        try {
+          deps.onRows(result.rows);
+        } catch {
+          // A throwing consumer must not surface as an unhandled rejection.
+        }
+      },
+      () => {
+        // A failed probe is simply no news; the poller carries on.
+      },
+    );
+  }
+
+  if (deps.isVisible()) {
+    run();
+  } else {
+    unsubscribe = deps.subscribeVisibility(() => {
+      if (deps.isVisible()) run();
+    });
+  }
+
+  return function stop(): void {
+    if (stopped) return;
+    stopped = true;
+    if (unsubscribe !== null) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    if (controller !== null) {
+      controller.abort();
+      controller = null;
+    }
+  };
+}
 
 interface NewClustersPillProps {
   /**
@@ -177,7 +283,7 @@ export function NewClustersPill({
   });
 
   useEffect(() => {
-    return startHeadPolling({
+    const deps: HeadPollingDeps = {
       fetchHead: (signal) =>
         fetch("/api/timeline/head", {
           signal,
@@ -205,7 +311,14 @@ export function NewClustersPill({
       now: readClock,
       setTimer: (fn, ms) => window.setTimeout(fn, ms),
       clearTimer: (handle) => window.clearTimeout(handle as number),
-    });
+    };
+    const stopPolling = startHeadPolling(deps);
+    // A stale first view is probed now instead of after the poller's first full interval (h201-timeline-1).
+    const stopProbe = startStaleProbe(deps, latest.current.newestPublished);
+    return () => {
+      stopProbe();
+      stopPolling();
+    };
   }, []);
 
   // The one automatic retry. It only arms a timer; its setState calls run in the
