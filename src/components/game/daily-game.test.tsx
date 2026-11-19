@@ -8,6 +8,15 @@ import { resolve } from "node:path";
 const trackMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/track", () => ({ track: trackMock }));
 
+// OyunModes reads useRouter().bfcacheId (Next's per-navigation id, see the
+// [h201-game-1] suite at the bottom) and RetryButton calls useRouter().refresh().
+// The tests call OyunModes as a plain function, so a real useRouter would throw
+// for want of an app router; this stand-in has the one mutable id they need.
+const nav = vi.hoisted(() => ({ bfcacheId: "_b_1_" }));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ bfcacheId: nav.bfcacheId, refresh: () => {} }),
+}));
+
 // A hook runtime for the copy-flow suite at the bottom of the file. While a
 // test has one mounted it replaces the hooks DailyGame uses; with none mounted
 // (the static renders above) every hook is React's own.
@@ -1294,6 +1303,9 @@ describe("OyunModes — a different puzzle never inherits the previous puzzle's 
     initialMode,
   });
 
+  beforeEach(() => {
+    nav.bfcacheId = "_b_1_";
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("replay of 14 Nov finished, then the footer link opens today's puzzle: today's answers are not shown and Başla is back", () => {
@@ -1409,5 +1421,36 @@ describe("OyunModes — a different puzzle never inherits the previous puzzle's 
 
     expect(page.isPressed(TAYF_TAB)).toBe(true);
     expect(page.isPressed("Bölge")).toBe(false);
+  });
+
+  // The home teaser's "Oyna" and the footer link are <Link> pushes to /oyun?mod=gunluk.
+  // With the route kept in a hidden Activity, the SAME OyunModes instance gets the
+  // same initialMode again, so only the navigation id can tell a fresh entry apart.
+  it("a second entry with ?mod=gunluk opens the daily tab again, though the reader had picked Bölge in between", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-17", 51, "again-a"), "2026-11-17", "gunluk"));
+    page.pressTab("Bölge");
+    expect(page.isPressed("Bölge")).toBe(true);
+
+    nav.bfcacheId = "_b_2_"; // a <Link> push into /oyun: Next hands the page a new id
+    page.navigate(pageProps(puzzleFor("2026-11-18", 52, "again-b"), "2026-11-18", "gunluk"));
+
+    expect(page.isPressed(TAYF_TAB)).toBe(true);
+    expect(page.isPressed("Bölge")).toBe(false);
+    expect(page.hasDailyGame()).toBe(true);
+    expect(page.gameText()).toContain("Günün Tayf’ı #52");
+    expect(page.gameText()).toContain("Başla");
+  });
+
+  it("the same initialMode and an unchanged navigation id (router.refresh, Back, a search-param change) leave the picked tab alone", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-17", 51, "refresh-a"), "2026-11-17", "gunluk"));
+    page.pressTab("Bölge");
+
+    // RetryButton's refresh() under a ?mod=gunluk URL re-renders with fresh props, same id.
+    page.navigate(pageProps(puzzleFor("2026-11-17", 51, "refresh-a"), "2026-11-17", "gunluk"));
+
+    expect(page.isPressed("Bölge")).toBe(true);
+    expect(page.isPressed(TAYF_TAB)).toBe(false);
   });
 });

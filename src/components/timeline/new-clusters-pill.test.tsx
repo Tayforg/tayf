@@ -15,7 +15,12 @@ import {
   isListStale,
   startStaleProbe,
 } from "./new-clusters-pill";
-import type { HeadFetchResult, TimelineHeadRow } from "@/lib/clusters/timeline-head";
+import {
+  TIMELINE_POLL_MS,
+  startHeadPolling,
+  type HeadFetchResult,
+  type TimelineHeadRow,
+} from "@/lib/clusters/timeline-head";
 
 // Source-guard helpers. `code` below is the file with comments blanked.
 
@@ -665,7 +670,10 @@ describe("startStaleProbe", () => {
 
   function setup(opts: { visible?: boolean; result?: () => Promise<HeadFetchResult> } = {}) {
     let visible = opts.visible ?? true;
+    let clock = NOW;
     const visibilityListeners = new Set<() => void>();
+    const timers = new Map<number, () => void>();
+    let nextTimer = 1;
     const signals: AbortSignal[] = [];
     const fetchHead = vi.fn((signal: AbortSignal) => {
       signals.push(signal);
@@ -680,7 +688,16 @@ describe("startStaleProbe", () => {
         visibilityListeners.add(cb);
         return () => visibilityListeners.delete(cb);
       },
-      now: () => NOW,
+      now: () => clock,
+      // Only startHeadPolling uses these two (the poller shares this object in the double-fetch tests).
+      setTimer: (fn: () => void) => {
+        const id = nextTimer++;
+        timers.set(id, fn);
+        return id;
+      },
+      clearTimer: (handle: unknown) => {
+        timers.delete(handle as number);
+      },
     };
     return {
       deps,
@@ -688,6 +705,10 @@ describe("startStaleProbe", () => {
       onRows,
       signals,
       visibilityListeners,
+      timers,
+      advance(ms: number) {
+        clock += ms;
+      },
       setVisible(v: boolean) {
         visible = v;
         for (const cb of [...visibilityListeners]) cb();
@@ -794,6 +815,80 @@ describe("startStaleProbe", () => {
       stop();
       stop();
     }).not.toThrow();
+  });
+
+  // A tab that is hidden at mount: the poller counts mount as its last attempt, so a reveal after
+  // TIMELINE_POLL_MS polls at once (its catch-up poll), and the deferred probe gives way to it.
+  describe("a deferred probe gives way to the poller's catch-up poll", () => {
+    it("a reveal after 3 min: the probe does not fetch and stops listening", () => {
+      const t = setup({ visible: false });
+      startStaleProbe(t.deps, STALE);
+      t.advance(3 * 60_000);
+      t.setVisible(true);
+      expect(t.fetchHead).not.toHaveBeenCalled();
+      expect(t.visibilityListeners.size).toBe(0);
+      t.setVisible(false);
+      t.setVisible(true);
+      expect(t.fetchHead).not.toHaveBeenCalled(); // and it never wakes up again
+    });
+
+    it("a reveal after 30 s: the poller has nothing due, so the probe fetches, once", () => {
+      const t = setup({ visible: false });
+      startStaleProbe(t.deps, STALE);
+      t.advance(30_000);
+      t.setVisible(true);
+      expect(t.fetchHead).toHaveBeenCalledTimes(1);
+      expect(t.visibilityListeners.size).toBe(0);
+    });
+
+    it("the cut is the poller's own first delay: one ms short of it the probe still fetches", () => {
+      const early = setup({ visible: false });
+      startStaleProbe(early.deps, STALE);
+      early.advance(TIMELINE_POLL_MS - 1);
+      early.setVisible(true);
+      expect(early.fetchHead).toHaveBeenCalledTimes(1);
+
+      const due = setup({ visible: false });
+      startStaleProbe(due.deps, STALE);
+      due.advance(TIMELINE_POLL_MS);
+      due.setVisible(true);
+      expect(due.fetchHead).not.toHaveBeenCalled();
+    });
+
+    it("a visible mount is unaffected: the probe fetches at once whatever the clock says", () => {
+      const t = setup();
+      startStaleProbe(t.deps, STALE);
+      expect(t.fetchHead).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["a reveal after 3 min", 3 * 60_000],
+      ["a reveal after 30 s", 30_000],
+      ["a reveal exactly at the poll interval", TIMELINE_POLL_MS],
+    ])("poller and probe on one shared deps object, %s: exactly one fetch", (_name, hiddenMs) => {
+      const t = setup({ visible: false });
+      const stopPolling = startHeadPolling(t.deps);
+      const stopProbe = startStaleProbe(t.deps, STALE);
+      expect(t.fetchHead).not.toHaveBeenCalled(); // hidden: neither fetches
+      t.advance(hiddenMs);
+      t.setVisible(true); // ONE visibilitychange
+      expect(t.fetchHead).toHaveBeenCalledTimes(1);
+      stopProbe();
+      stopPolling();
+    });
+
+    it("the order the two subscribed in does not matter: still exactly one fetch", () => {
+      for (const hiddenMs of [30_000, 3 * 60_000]) {
+        const t = setup({ visible: false });
+        const stopProbe = startStaleProbe(t.deps, STALE);
+        const stopPolling = startHeadPolling(t.deps);
+        t.advance(hiddenMs);
+        t.setVisible(true);
+        expect(t.fetchHead, `${hiddenMs} ms`).toHaveBeenCalledTimes(1);
+        stopProbe();
+        stopPolling();
+      }
+    });
   });
 });
 

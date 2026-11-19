@@ -1268,12 +1268,74 @@ describe("the visit never reads the device clock (source guard) [h201-follows-1]
     expect(code).not.toContain("toISOString");
   });
 
+  it("reads the device clock only as a reading to measure its skew against the response's Date header", () => {
+    // Four Date.now() calls: nowMs() (the unfollow guard), the re-entry check, the settle log,
+    // and deviceNowMs, which only feeds followBaseline's skew correction.
+    expect(code.split("Date.now()")).toHaveLength(5);
+    expect(code.split("deviceNowMs: Date.now()")).toHaveLength(2);
+  });
+
   it("marks the visit seen with the rows alone (each carries its server stamp)", () => {
     expect(code).toContain("followsStore.markSeen(shown);");
   });
 
   it("the snapshot of a follow is its stored baseline minus a device-clock stamp (followBaseline)", () => {
     expect(code).toContain("next[key] = seenSnapshot[key] ?? followBaseline(f);");
+  });
+});
+
+// The first visit after a follow: addFollow's device stamp is moved onto the
+// server's timeline with the skew the response's Date header measures, so the
+// stories listed since the follow keep their "yeni" badge (the decision itself is
+// unit-tested in follows.test.ts, the wiring is guarded here).
+describe("the first visit anchors the device stamp to the response's Date (source guard) [h201-follows-1]", () => {
+  const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
+  const fetchStart = src.indexOf("useEffect(() => {\n    // Rebuilt from the signature");
+  const fetchEnd = src.indexOf("}, [keysSignature, retryNonce]);");
+  const fetchEffect = src.slice(fetchStart, fetchEnd);
+  const callAt = fetchEffect.indexOf("followBaseline(stored, {");
+  const okStart = fetchEffect.indexOf('if (outcome.status === "ok") {');
+  const elseStart = fetchEffect.indexOf("} else {", okStart);
+  const okBranch = fetchEffect.slice(okStart, elseStart);
+
+  it("slices the code it is guarding", () => {
+    expect(fetchStart).toBeGreaterThan(-1);
+    expect(fetchEnd).toBeGreaterThan(fetchStart);
+    expect(callAt).toBeGreaterThan(-1);
+    expect(okStart).toBeGreaterThan(-1);
+    expect(elseStart).toBeGreaterThan(okStart);
+  });
+
+  it("passes the response's server instant and the device reading into followBaseline, for a stored device-stamp-only follow that is not a re-entry refresh", () => {
+    expect(fetchEffect).toContain(
+      "followBaseline(stored, { serverNowIso: outcome.serverNow, deviceNowMs: Date.now() })",
+    );
+    expect(fetchEffect).toContain("isDeviceStampOnly(stored)");
+    expect(fetchEffect).toContain("followsStore.read().find((f) => followKey(f) === item.key)");
+    // only for a successful, non-refreshed fetch: a refreshed follow keeps the stored baseline
+    const guardAt = fetchEffect.lastIndexOf("outcome.status === \"ok\" && !refreshed", callAt);
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(callAt);
+  });
+
+  it("the corrected baseline is computed right after the response lands, before the rows are recorded", () => {
+    const refreshedAt = fetchEffect.indexOf("const refreshed = refreshing.current.has(item.key);");
+    const recordAt = fetchEffect.indexOf("shownRows.current.set(item.key, rowsShown(");
+    expect(refreshedAt).toBeGreaterThan(-1);
+    expect(callAt).toBeGreaterThan(refreshedAt);
+    expect(callAt).toBeLessThan(recordAt);
+  });
+
+  it("records the rows with it and replaces the follow's snapshot in the same batch as the list", () => {
+    expect(okBranch).toContain("rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW, outcome.serverNow)");
+    expect(okBranch).toContain("if (refreshed || anchored !== null) {");
+    expect(okBranch).toContain("setSeenSnapshot((prev) => ({ ...prev, [item.key]: baseline }));");
+    // the snapshot is replaced before setResults, inside the same task
+    expect(fetchEffect.indexOf("setSeenSnapshot(", okStart)).toBeLessThan(fetchEffect.indexOf("setResults(", okStart));
+  });
+
+  it("the retry announcement counts with the same baseline the section renders", () => {
+    expect(fetchEffect).toContain("retryResultAnnouncement(label, outcome, baseline)");
   });
 });
 
