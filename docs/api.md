@@ -332,7 +332,7 @@ The `200` window is bounded: a CDN copy is served for at most `s-maxage` + `stal
 | Parameter | Meaning |
 | --- | --- |
 | `url` | **required.** `https://www.tayfhaber.com/cluster/{uuid}` (or the apex host `tayfhaber.com`, or the site's own host when `NEXT_PUBLIC_SITE_URL` is https). A query string, hash and one trailing slash are ignored. |
-| `format` | optional. Only `json` is supported; anything else (including `xml`) is `501`. |
+| `format` | optional. Only `json` is supported. A missing, empty or whitespace-only value means `json`, and the match ignores case (`JSON` and `Json` work). Anything else (including `xml` in any case) is `501`. |
 | `maxwidth` | optional integer, clamped to 120-560 (default 560). Anything that is not 1-5 plain digits falls back to the default. |
 | `maxheight` | optional integer, clamped to 120-240 (default 200), same parsing. |
 
@@ -356,7 +356,7 @@ The `200` window is bounded: a CDN copy is served for at most `s-maxage` + `stal
 
 Status order (first match wins):
 
-1. `501` -- `format` is present and not `json`.
+1. `501` -- `format` is present, not blank, and not `json` (any case).
 2. `400` -- `url` is missing or empty.
 3. `404` -- `url` is not a Tayf cluster URL (wrong scheme/host/port/path, userinfo, non-uuid id, longer than 2048 characters).
 4. `503` -- the cluster read failed (`Cache-Control: no-store`).
