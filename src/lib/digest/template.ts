@@ -4,7 +4,8 @@ import {
   zoneCountsOf,
   zonePercents,
 } from "@/lib/bias/zone-summary";
-import { sourceCountHead } from "@/lib/feeds/zone-line";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
+import { sourceCountHead, wireSourceCountHead } from "@/lib/feeds/zone-line";
 import type { BiasDistribution, MediaDnaZone } from "@/types";
 
 // Pure HTML renderer for the weekly digest email (GET /api/cron/digest).
@@ -28,9 +29,22 @@ export interface DigestClusterItem {
    * Every member of the cluster. The zone bar above the count is drawn from
    * `biasDistribution` (voting sources only), so the line prints both through
    * `sourceCountHead`: "16 kaynak (10 sınıflandırılmış)" (h66-statsparity-1).
+   * A wire item (`isWireRedistribution` plus a positive `effectiveArticleCount`)
+   * prints its `effectiveArticleCount` through `wireSourceCountHead` and then
+   * `wireBadgeLabel(articleCount, effective)` (see `storyCountLine`).
    */
   articleCount: number;
   biasDistribution: BiasDistribution;
+  /**
+   * h203-wire-callers: `bundle.isWireRedistribution`, the cluster page's own
+   * signal (at least half of the members repeat another member's text). With
+   * `effectiveArticleCount` (the bundle's distinct-text count) the line prints
+   * the cluster page's "N kaynak" and the wire cue instead of every member,
+   * exactly as the blindspots feed does. Optional: an item built without them
+   * reads as a plain story.
+   */
+  isWireRedistribution?: boolean;
+  effectiveArticleCount?: number;
 }
 
 export interface DigestBlindspotItem {
@@ -132,6 +146,24 @@ function summaryBlock(summary: string, summaryLabel: string | null): string {
         </p>`;
 }
 
+/**
+ * The count line under a story's zone bar. A wire redistribution is counted in
+ * distinct texts, as on the cluster page, the embed and the RSS feeds: "N kaynak"
+ * is its effective count (naming the classified votes when they outnumber it) and
+ * the wire cue follows as its own sentence, in the shape the blindspots feed gives
+ * it ("3 kaynak · 4 sınıflandırılmış. Ajans ağırlıklı · 6 haber, 3 farklı metin.").
+ * Anything else, and a wire story with no usable text count, is the plain
+ * `sourceCountHead` line it always was.
+ */
+function storyCountLine(item: DigestClusterItem): string {
+  const counts = zoneCountsOf(item.biasDistribution);
+  const effective = item.effectiveArticleCount;
+  if (item.isWireRedistribution === true && effective !== undefined && effective > 0) {
+    return `${wireSourceCountHead(effective, counts, true)}. ${wireBadgeLabel(item.articleCount, effective)}.`;
+  }
+  return sourceCountHead(item.articleCount, counts);
+}
+
 function storyBlock(item: DigestClusterItem, siteUrl: string): string {
   const link = `${siteUrl}/cluster/${encodeURIComponent(item.id)}`;
   return `
@@ -143,7 +175,7 @@ function storyBlock(item: DigestClusterItem, siteUrl: string): string {
         ${summaryBlock(item.summary, item.summaryLabel)}
         ${zoneBar(item.biasDistribution)}
         <p style="margin:2px 0 0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
-          ${sourceCountHead(item.articleCount, zoneCountsOf(item.biasDistribution))}
+          ${storyCountLine(item)}
         </p>
       </td>
     </tr>`;
