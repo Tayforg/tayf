@@ -2,7 +2,9 @@ import {
   formatZoneLine,
   sourceCountHead,
   votingZoneCounts,
+  wireSourceCountHead,
 } from "@/lib/feeds/zone-line";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
 import { withUtm } from "@/lib/feeds/rss-builder";
 import { ZONE_META } from "@/lib/bias/config";
 import { cutAtWord } from "@/lib/seo/og-title";
@@ -26,20 +28,36 @@ export interface ComposeSource {
    * Zone lines and the "N bölge" count tally only voting kinds (outlet,
    * wire) via `votingZoneCounts`, matching the card. Optional/nullable like
    * `Source.kind`: a missing or null kind counts as voting. The "N kaynak"
-   * head is the full `sources.length`, as on the card, and carries the voting
-   * count in parentheses when they differ ("10 kaynak (8 sınıflandırılmış)").
+   * head of a plain cluster is the full `sources.length`, as on the card, and
+   * carries the voting count in parentheses when they differ ("10 kaynak (8
+   * sınıflandırılmış)"). A wire redistribution (`isWireRedistribution` plus a
+   * positive `effectiveArticleCount`, see {@link ComposeWireSignal}) prints its
+   * `effectiveArticleCount` through `wireSourceCountHead` instead, followed by a
+   * `wireBadgeLabel` cue line.
    */
   kind?: SourceKind | null;
 }
 
-export interface ComposeBlindspotInput {
+/**
+ * h203-wire-callers: the cluster's wire signal, `bundle.isWireRedistribution` and
+ * `bundle.effectiveArticleCount` (its distinct texts). With both, the post prints
+ * the cluster page's "N kaynak" and the wire cue instead of every member, the way
+ * the blindspots feed does. Optional: input built without them (or a wire flag with
+ * no positive text count) reads as a plain cluster and composes exactly as before.
+ */
+export interface ComposeWireSignal {
+  isWireRedistribution?: boolean;
+  effectiveArticleCount?: number;
+}
+
+export interface ComposeBlindspotInput extends ComposeWireSignal {
   title: string;
   clusterUrl: string;
   dominantZone: MediaDnaZone;
   sources: ReadonlyArray<ComposeSource>;
 }
 
-export interface ComposeTopStoryInput {
+export interface ComposeTopStoryInput extends ComposeWireSignal {
   title: string;
   clusterUrl: string;
   sources: ReadonlyArray<ComposeSource>;
@@ -61,6 +79,28 @@ export interface BlueskyText {
   embed: BlueskyEmbed;
 }
 
+/**
+ * The "N kaynak" head of a post and, for a wire redistribution, the cue line.
+ * A wire cluster counts its distinct texts (`wireSourceCountHead` names the
+ * classified votes when they outnumber them) and the cue is `wireBadgeLabel` over
+ * the member count, the pair the blindspots feed prints. Anything else, and a wire
+ * cluster with no usable text count, is `sourceCountHead` over every member and no
+ * cue, byte for byte what the poster always printed.
+ */
+function countHeadOf(
+  input: ComposeWireSignal & { sources: ReadonlyArray<ComposeSource> },
+  counts: Record<MediaDnaZone, number>,
+): { head: string; cue: string[] } {
+  const effective = input.effectiveArticleCount;
+  if (input.isWireRedistribution === true && effective !== undefined && effective > 0) {
+    return {
+      head: wireSourceCountHead(effective, counts, true),
+      cue: [wireBadgeLabel(input.sources.length, effective)],
+    };
+  }
+  return { head: sourceCountHead(input.sources.length, counts), cue: [] };
+}
+
 function utmUrl(clusterUrl: string, channel: "telegram" | "bluesky", campaign: "kor_nokta" | "gundem"): string {
   return withUtm(clusterUrl, { source: channel, medium: "social", campaign });
 }
@@ -68,7 +108,7 @@ function utmUrl(clusterUrl: string, channel: "telegram" | "bluesky", campaign: "
 export function composeTelegramBlindspot(input: ComposeBlindspotInput): TelegramText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const head = sourceCountHead(input.sources.length, counts);
+  const { head, cue } = countHeadOf(input, counts);
   const zoneLabel = ZONE_META[input.dominantZone].label;
   const url = utmUrl(input.clusterUrl, "telegram", "kor_nokta");
 
@@ -76,6 +116,7 @@ export function composeTelegramBlindspot(input: ComposeBlindspotInput): Telegram
     `Kör nokta · ${zoneLabel} ağırlıklı haber`,
     input.title,
     `${head}: ${zoneLine}`,
+    ...cue,
     "Diğer bölgelerden bu kümede az ya da hiç haber yok.",
     url,
   ];
@@ -86,7 +127,7 @@ export function composeTelegramBlindspot(input: ComposeBlindspotInput): Telegram
 export function composeTelegramTopStory(input: ComposeTopStoryInput): TelegramText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const head = sourceCountHead(input.sources.length, counts);
+  const { head, cue } = countHeadOf(input, counts);
   const url = utmUrl(input.clusterUrl, "telegram", "gundem");
   const zoneCount = countZonesCovered(counts);
 
@@ -94,6 +135,7 @@ export function composeTelegramTopStory(input: ComposeTopStoryInput): TelegramTe
     `Gündem · ${head}, ${zoneCount} bölge`,
     input.title,
     zoneLine,
+    ...cue,
     `Kim nasıl yazdı: ${url}`,
   ];
 
@@ -168,7 +210,7 @@ function buildBlueskyText(lines: string[], titleIndex: number): string {
 export function composeBlueskyBlindspot(input: ComposeBlindspotInput): BlueskyText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const head = sourceCountHead(input.sources.length, counts);
+  const { head, cue } = countHeadOf(input, counts);
   const zoneLabel = ZONE_META[input.dominantZone].label;
   const url = utmUrl(input.clusterUrl, "bluesky", "kor_nokta");
 
@@ -176,6 +218,7 @@ export function composeBlueskyBlindspot(input: ComposeBlindspotInput): BlueskyTe
     `Kör nokta · ${zoneLabel} ağırlıklı haber`,
     input.title,
     `${head}: ${zoneLine}`,
+    ...cue,
     "Diğer bölgelerden bu kümede az ya da hiç haber yok.",
   ];
 
@@ -190,11 +233,11 @@ export function composeBlueskyBlindspot(input: ComposeBlindspotInput): BlueskyTe
 export function composeBlueskyTopStory(input: ComposeTopStoryInput): BlueskyText {
   const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
-  const head = sourceCountHead(input.sources.length, counts);
+  const { head, cue } = countHeadOf(input, counts);
   const zoneCount = countZonesCovered(counts);
   const url = utmUrl(input.clusterUrl, "bluesky", "gundem");
 
-  const lines = [`Gündem · ${head}, ${zoneCount} bölge`, input.title, zoneLine];
+  const lines = [`Gündem · ${head}, ${zoneCount} bölge`, input.title, zoneLine, ...cue];
 
   const text = buildBlueskyText(lines, 1);
 

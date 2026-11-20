@@ -561,6 +561,36 @@ describe("GET /api/cron/digest", () => {
       expect(html).not.toContain("Altinci Hikaye");
     });
 
+    // h203-wire-callers: the bundle already carries the cluster page's wire signal
+    // (isWireRedistribution + effectiveArticleCount); the route hands it to the
+    // template so the mail prints the distinct-text head and the wire cue.
+    it("a wire story prints the distinct-text count and the wire cue; a plain story keeps its line", async () => {
+      const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
+      const wire = {
+        ...storyBundle("wire1", "Ajans Hikayesi", 6),
+        isWireRedistribution: true,
+        effectiveArticleCount: 3,
+      };
+      wire.cluster.bias_distribution = { pro_government: 1, gov_leaning: 2, center: 1 };
+      const plain = {
+        ...storyBundle("plain1", "Sıradan Hikaye", 4),
+        isWireRedistribution: false,
+        effectiveArticleCount: 4,
+      };
+      (getWeeklyDigestClusters as unknown as Mock).mockResolvedValueOnce([wire, plain]);
+
+      const { res, sendBatch } = await runDigest();
+      expect(res.status).toBe(200);
+
+      const html = sendBatch.mock.calls[0]![0][0].html as string;
+      expect(html).toContain("3 kaynak · 4 sınıflandırılmış");
+      expect(html).toContain("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+      expect(html).not.toContain("6 kaynak");
+      // The plain story (no votes in its empty distribution) is untouched.
+      expect(html).toMatch(/>\s*4 kaynak \(0 sınıflandırılmış\)\s*</);
+      expect(html.match(/Ajans ağırlıklı/g)).toHaveLength(1);
+    });
+
     it("hands getRssSummaryMembers exactly the five clusters it renders", async () => {
       const { getWeeklyDigestClusters } = await import("@/lib/clusters/politics-query");
       (getWeeklyDigestClusters as unknown as Mock).mockResolvedValueOnce(

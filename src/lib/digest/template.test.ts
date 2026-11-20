@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { buildDigestHtml, type DigestClusterItem, type DigestBlindspotItem } from "./template";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
+import { sourceCountHead, wireSourceCountHead } from "@/lib/feeds/zone-line";
 
 function dist(overrides: Partial<Record<string, number>> = {}) {
   return { ...emptyBiasDistribution(), ...overrides };
@@ -293,6 +295,120 @@ describe("buildDigestHtml", () => {
       expect(marked).toContain('width="57%"');
       expect(marked).toContain("%90");
       expect(marked.replace("16 kaynak (7 sınıflandırılmış)", "7 kaynak")).toBe(bare);
+    });
+  });
+
+  // h203-wire-callers: a wire redistribution counts its distinct texts, as the
+  // cluster page, the share surfaces and the feeds do (wireSourceCountHead +
+  // wireBadgeLabel), so its classified votes can exceed the "N kaynak" it prints.
+  // Copy is asserted against the helpers' own output, never a hand-typed twin.
+  describe("wire redistribution story line (h203-wire-callers)", () => {
+    // The 2026-11-16 COP31 cluster: 6 outlets, 3 distinct texts, 4 voters
+    // (İktidar 3, Bağımsız 1; two members are aggregators).
+    const WIRE_DIST = dist({ pro_government: 1, gov_leaning: 2, center: 1 });
+    const WIRE_COUNTS = { iktidar: 3, bagimsiz: 1, muhalefet: 0 };
+    const WIRE: DigestClusterItem = {
+      ...CLUSTER,
+      articleCount: 6,
+      biasDistribution: WIRE_DIST,
+      isWireRedistribution: true,
+      effectiveArticleCount: 3,
+    };
+    const storyLine = (html: string) =>
+      html.match(/<p style="margin:2px 0 0;color:#a1a1aa[^>]*>\s*([\s\S]*?)\s*<\/p>/)?.[1];
+
+    it("prints the distinct-text head and the wire cue, never the raw member count", () => {
+      const html = buildDigestHtml({ ...BASE, clusters: [WIRE] });
+
+      expect(storyLine(html)).toBe(
+        `${wireSourceCountHead(3, WIRE_COUNTS, true)}. ${wireBadgeLabel(6, 3)}.`,
+      );
+      expect(html).toContain("3 kaynak · 4 sınıflandırılmış");
+      expect(html).toContain("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+      expect(html).not.toContain("6 kaynak");
+    });
+
+    it("one text behind every member: the single-source cue", () => {
+      const html = buildDigestHtml({
+        ...BASE,
+        clusters: [{ ...WIRE, articleCount: 5, effectiveArticleCount: 1 }],
+      });
+
+      expect(storyLine(html)).toBe(
+        `${wireSourceCountHead(1, WIRE_COUNTS, true)}. ${wireBadgeLabel(5, 1)}.`,
+      );
+      expect(html).toContain("Tek kaynaktan dağıtıldı · 5 kopya");
+    });
+
+    it("votes at or below the text count keep sourceCountHead's own wording, with the cue", () => {
+      const equal = buildDigestHtml({
+        ...BASE,
+        clusters: [{ ...WIRE, effectiveArticleCount: 4 }],
+      });
+      expect(storyLine(equal)).toBe(`4 kaynak. ${wireBadgeLabel(6, 4)}.`);
+
+      const fewer = buildDigestHtml({
+        ...BASE,
+        clusters: [{ ...WIRE, effectiveArticleCount: 5 }],
+      });
+      expect(storyLine(fewer)).toBe(
+        `${sourceCountHead(5, WIRE_COUNTS)}. ${wireBadgeLabel(6, 5)}.`,
+      );
+      expect(storyLine(fewer)).toContain("5 kaynak (4 sınıflandırılmış)");
+    });
+
+    it("a story that is not a wire redistribution is byte-identical to the plain line", () => {
+      const plain = buildDigestHtml({
+        ...BASE,
+        clusters: [{ ...CLUSTER, articleCount: 6, biasDistribution: WIRE_DIST }],
+      });
+      const flaggedOff = buildDigestHtml({
+        ...BASE,
+        clusters: [
+          {
+            ...CLUSTER,
+            articleCount: 6,
+            biasDistribution: WIRE_DIST,
+            isWireRedistribution: false,
+            effectiveArticleCount: 6,
+          },
+        ],
+      });
+
+      expect(flaggedOff).toBe(plain);
+      expect(storyLine(plain)).toBe(sourceCountHead(6, WIRE_COUNTS));
+      expect(plain).not.toContain("Ajans ağırlıklı");
+      expect(plain).not.toContain("Tek kaynaktan");
+    });
+
+    it("a wire flag with no usable text count falls back to the plain line", () => {
+      const plain = buildDigestHtml({
+        ...BASE,
+        clusters: [{ ...CLUSTER, articleCount: 6, biasDistribution: WIRE_DIST }],
+      });
+
+      for (const effectiveArticleCount of [undefined, 0, -1, Number.NaN]) {
+        const html = buildDigestHtml({
+          ...BASE,
+          clusters: [{ ...WIRE, effectiveArticleCount }],
+        });
+        expect(html).toBe(plain);
+      }
+    });
+
+    it("only the wire story changes: a plain story beside it keeps its line and the blindspot block is untouched", () => {
+      const plainOnly = buildDigestHtml({ ...BASE, clusters: [CLUSTER] });
+      const mixed = buildDigestHtml({ ...BASE, clusters: [WIRE, CLUSTER] });
+
+      expect(mixed).toContain("3 kaynak · 4 sınıflandırılmış");
+      expect(mixed).toMatch(/>\s*7 kaynak\s*</);
+      expect(mixed).toContain("%90");
+      expect(mixed).toContain(BLINDSPOT.title);
+      // The Kör Nokta block (it prints no source count) is the same bytes with or
+      // without a wire story above it.
+      expect(mixed.slice(mixed.indexOf("Kör Nokta"))).toBe(
+        plainOnly.slice(plainOnly.indexOf("Kör Nokta")),
+      );
     });
   });
 
