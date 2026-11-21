@@ -857,6 +857,12 @@ describe("selectRelatedClusters — relatedness", () => {
     // stems stay excluded: "merkez" and "banka" are still the entity's own words.
     expect(entityKeysIn(bankOnly)).toEqual([]);
     expect(isRelatedTitle(cur, "Paraguay Merkez Bankası bankaya el koydu")).toBe(false);
+    // A foreign bank with no cue word gets no tcmb key at all (the withheld-key path).
+    expect(entityKeysIn("Özbekistan Merkez Bankası yeni başkanını atadı")).toEqual([]);
+    expect(isRelatedTitle(cur, "Özbekistan Merkez Bankası yeni başkanını atadı")).toBe(false);
+    // The 'banknot' cue (h205-gundem-3) does admit the key for a foreign bank's banknote
+    // story; it stays unrelated only because the entity key needs one more shared stem.
+    expect(entityKeysIn("Özbekistan Merkez Bankası yeni banknot bastı")).toEqual(["tcmb"]);
     expect(isRelatedTitle(cur, "Özbekistan Merkez Bankası yeni banknot bastı")).toBe(false);
     const out = select([titled("alias", 1, viaAlias), titled("also", 2, "Merkez Bankası rezervleri sabit kaldı")], {
       currentTitle: cur,

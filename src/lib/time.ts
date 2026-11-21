@@ -58,6 +58,30 @@ export function formatTurkishDate(dateISO: string): string {
   }).format(then);
 }
 
+/**
+ * Absolute Turkish date and time, e.g. "21 Kasım 2026 14:05" (Istanbul time).
+ *
+ * Same pinned `Europe/Istanbul` zone as `formatTurkishDate`, for the same
+ * reason: the output is identical on the server and in any visitor's zone.
+ * Formats the instant it is given and never reads the clock, so a prerendered
+ * page can print it (the /sources "derlenme zamanı" stamp).
+ *
+ * Returns `""` for an unparseable input, same guard as `formatTurkishDate`.
+ */
+export function formatTurkishDateTime(dateISO: string): string {
+  const then = new Date(dateISO).getTime();
+  if (Number.isNaN(then)) return "";
+
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Europe/Istanbul",
+  }).format(then);
+}
+
 export function formatTurkishTimeAgo(
   dateISO: string,
   opts?: { absoluteAfterMs?: number; now?: number },
