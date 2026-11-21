@@ -361,7 +361,8 @@ import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
 import { BIAS_LABELS } from "@/lib/bias/config";
 import { SOURCE_KIND_META } from "@/lib/sources/kind";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
-import { formatTurkishTimeAgo } from "@/lib/time";
+import { formatTurkishDate, formatTurkishTimeAgo } from "@/lib/time";
+import { RelativeTime, pickDisplayNow } from "@/components/story/relative-time";
 
 /**
  * Collects every string/number leaf under a React element tree. Expands
@@ -763,7 +764,7 @@ describe("/sources page source — the directory is not rendered twice", () => {
 
   it("still streams <SourceDirectoryWithCounts> behind the one Suspense, handing it the counts promise", () => {
     expect(code).toContain(
-      "<SourceDirectoryWithCounts grouped={grouped} perDay={perDayPromise} />",
+      "<SourceDirectoryWithCounts grouped={grouped} perDay={perDayPromise} asOfMs={asOfMs} />",
     );
   });
 
@@ -888,6 +889,11 @@ describe("/sources page — the weekly counts overlap the directory read (cold p
 // name is its visible text. The external "↗" link is a 24 x 24 target.
 // ---------------------------------------------------------------------------
 
+// The fixture clock: the instant the mocked directory read "fills" (asOfMs). Declared
+// before the first describe-time render below, which already needs it.
+const NOW_MS = Date.parse("2026-11-01T12:00:00.000Z");
+const hoursAgoIso = (hours: number) => new Date(NOW_MS - hours * 3_600_000).toISOString();
+
 type GroupedSources = Parameters<typeof SourceDirectory>[0]["grouped"];
 
 const GZT = {
@@ -905,7 +911,6 @@ const GZT = {
   trustee_since: null,
   trustee_note: null,
   lastPublishedAt: null,
-  lastSeenLabel: null,
 };
 
 describe("SourceDirectory card -- accessible name and target size", () => {
@@ -913,6 +918,7 @@ describe("SourceDirectory card -- accessible name and target size", () => {
     createElement(SourceDirectory, {
       grouped: { pro_government: [GZT] } as unknown as GroupedSources,
       countLabel: "12 haber",
+      asOfMs: NOW_MS,
     }),
   );
 
@@ -1044,9 +1050,6 @@ describe("SourceDirectory card -- accessible name and target size", () => {
 // The page is now prerenderable: every clock-dependent value is stamped inside
 // the cached read, at fill time.
 // ---------------------------------------------------------------------------
-
-const NOW_MS = Date.parse("2026-11-01T12:00:00.000Z");
-const hoursAgoIso = (hours: number) => new Date(NOW_MS - hours * 3_600_000).toISOString();
 
 type StatsRow = GroupedSources[keyof GroupedSources][number];
 
@@ -1224,8 +1227,11 @@ describe("/sources page source -- the first hit after a deploy must be a prerend
     expect(outsideReader).not.toMatch(CLOCK_READ);
   });
 
-  it("the reader hands formatTurkishTimeAgo its own fill-time `now`", () => {
-    expect(reader).toMatch(/formatTurkishTimeAgo\([^)]*\bnow:/);
+  it("the reader formats no label: it returns its own fill-time `nowMs` as asOfMs (h205-kaynak-1)", () => {
+    expect(reader).not.toMatch(/\bformatTurkishTimeAgo\s*\(/);
+    expect(reader).toMatch(/\basOfMs\s*:\s*nowMs\b/);
+    // The one clock value the verdicts use is the one the page is stamped with.
+    expect(reader).toMatch(/deriveDirectoryStats\(grouped,\s*nowMs\)/);
   });
 
   it("functionSource and the clock pattern tolerate nested braces and flag stray reads", () => {
@@ -1582,69 +1588,319 @@ describe("/sources page -- clock values are stamped when the directory is read",
     expect(note?.props).toMatchObject({ delivering: 1, total: 2 });
   });
 
-  it("every row carries a lastSeenLabel computed at fill time, and a quiet source carries none", async () => {
-    supabaseFixture.latestBySlug = {
-      "s-outlet": hoursAgoIso(3),
-      "s-wire": hoursAgoIso(100),
-    };
+  // -------------------------------------------------------------------------
+  // h205-kaynak-1: the card used to print a label baked at fill time
+  // ("3 saat önce") and the page carried no as-of stamp, so a copy served after
+  // an idle spell showed hours-old ages and "Akış alınamıyor" markers as current.
+  // The read now returns the clock it already took (asOfMs); every age and the
+  // new "derlenme zamanı" line (a fixed Istanbul stamp plus the relative part)
+  // go through <RelativeTime iso nowMs={asOfMs} />, whose first render is the
+  // old string (stable hydration) and which re-bases to the reader's clock
+  // after mount.
+  // -------------------------------------------------------------------------
 
+  async function streamedProps() {
     const tree = await SourcesPage();
     const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
-    const grouped = child.props?.grouped as Record<
-      string,
-      Array<{ slug: string; lastSeenLabel: string | null }>
-    >;
-    const label = (bias: string, slug: string) =>
-      grouped[bias]?.find((r) => r.slug === slug)?.lastSeenLabel;
+    return child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+  }
 
-    expect(label("pro_government", "s-outlet")).toBe("3 saat önce");
-    // Older than 48 h the helper switches to an absolute date; it is stamped too.
-    expect(label("state_media", "s-wire")).toBe(
-      formatTurkishTimeAgo(hoursAgoIso(100), { now: NOW_MS }),
-    );
-    expect(label("state_media", "s-wire")).not.toMatch(/önce$/);
-    expect(label("center", "s-aggregator")).toBeNull();
+  function findAllByType(node: unknown, type: unknown, out: TreeElement[] = []): TreeElement[] {
+    if (Array.isArray(node)) {
+      for (const child of node) findAllByType(child, type, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as TreeElement;
+      if (el.type === type) out.push(el);
+      if (el.props?.children !== undefined) findAllByType(el.props.children, type, out);
+    }
+    return out;
+  }
+
+  /** The card grid exactly as the streamed child hands it on: SourceDirectoryWithCounts -> SourceDirectory. */
+  async function cardTree(props: Parameters<typeof SourceDirectoryWithCounts>[0]) {
+    const element = (await SourceDirectoryWithCounts(props)) as unknown as {
+      type: unknown;
+      props: Parameters<typeof SourceDirectory>[0];
+    };
+    expect(element.type).toBe(SourceDirectory);
+    return SourceDirectory(element.props);
+  }
+
+  const byIso = (a: TreeElement, b: TreeElement) =>
+    String(a.props?.iso) < String(b.props?.iso) ? -1 : 1;
+
+  it("the directory read hands the streamed directory asOfMs: the fill-time clock, with no baked label on any row", async () => {
+    supabaseFixture.latestBySlug = { "s-outlet": hoursAgoIso(3), "s-wire": hoursAgoIso(100) };
+
+    const props = await streamedProps();
+
+    expect(props.asOfMs).toBe(NOW_MS);
+    const rows = Object.values(props.grouped).flat();
+    expect(rows).toHaveLength(3);
+    for (const row of rows) expect("lastSeenLabel" in row).toBe(false);
+    // The raw instant stays on the row: it is what RelativeTime counts from.
+    expect(rows.find((r) => r.slug === "s-outlet")?.lastPublishedAt).toBe(hoursAgoIso(3));
+    expect(rows.find((r) => r.slug === "s-aggregator")?.lastPublishedAt).toBeNull();
   });
 
-  it("the label does not drift while the cached directory is served: rendering ten hours later shows the fill-time text", async () => {
+  it("asOfMs is the clock at the moment of the read, not a constant: a read ten hours later is stamped ten hours later", async () => {
+    const first = await streamedProps();
+    vi.setSystemTime(NOW_MS + 10 * 3_600_000);
+    const second = await streamedProps();
+
+    expect(first.asOfMs).toBe(NOW_MS);
+    expect(second.asOfMs).toBe(NOW_MS + 10 * 3_600_000);
+  });
+
+  it("a card with a lastPublishedAt holds <RelativeTime iso={lastPublishedAt} nowMs={asOfMs} />; a source with none holds no time element", async () => {
+    supabaseFixture.latestBySlug = { "s-outlet": hoursAgoIso(3), "s-wire": hoursAgoIso(100) };
+    // s-aggregator has no article in the window: lastPublishedAt is null.
+
+    const props = await streamedProps();
+    const relatives = findAllByType(await cardTree(props), RelativeTime).sort(byIso);
+
+    expect(relatives.map((r) => r.props)).toEqual([
+      { iso: hoursAgoIso(100), nowMs: props.asOfMs },
+      { iso: hoursAgoIso(3), nowMs: props.asOfMs },
+    ]);
+    expect(props.asOfMs).toBe(NOW_MS);
+  });
+
+  it("with no lastPublishedAt anywhere the card grid holds no RelativeTime and prints no age", async () => {
+    const props = await streamedProps();
+
+    expect(findAllByType(await cardTree(props), RelativeTime)).toEqual([]);
+    const markup = renderToStaticMarkup(
+      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber", asOfMs: props.asOfMs }),
+    );
+    expect(markup).not.toContain("<time");
+    expect(markup).not.toContain("önce");
+  });
+
+  it("the first render prints today's text: 3 hours reads '3 saat önce', 100 hours the absolute date the helper gives", async () => {
+    supabaseFixture.latestBySlug = { "s-outlet": hoursAgoIso(3), "s-wire": hoursAgoIso(100) };
+
+    const props = await streamedProps();
+    const markup = renderToStaticMarkup(
+      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber", asOfMs: props.asOfMs }),
+    );
+
+    expect(markup).toContain(`<time dateTime="${hoursAgoIso(3)}">3 saat önce</time>`);
+    const old = formatTurkishTimeAgo(hoursAgoIso(100), { now: NOW_MS });
+    expect(old).not.toMatch(/önce$/);
+    expect(markup).toContain(`<time dateTime="${hoursAgoIso(100)}">${old}</time>`);
+    expect(markup.split("<time").length - 1).toBe(2);
+  });
+
+  it("the age does not move with the render clock: rendering ten hours later still prints the fill-time text, and the reader's clock does the re-basing", async () => {
     supabaseFixture.latestBySlug = { "s-outlet": hoursAgoIso(3) };
-    const tree = await SourcesPage();
-    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
-    const props = child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+    const props = await streamedProps();
 
     vi.setSystemTime(NOW_MS + 10 * 3_600_000);
     const markup = renderToStaticMarkup(
-      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber" }),
+      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber", asOfMs: props.asOfMs }),
     );
 
-    const timeLine = /<p class="text-\[10px\] text-muted-foreground">([^<]*)<\/p>/.exec(markup);
-    expect(timeLine?.[1]).toBe("3 saat önce");
+    expect(markup).toContain(`<time dateTime="${hoursAgoIso(3)}">3 saat önce</time>`);
+    // After mount on a reader whose clock is 10 h ahead, the same props read 13 h.
+    expect(
+      formatTurkishTimeAgo(hoursAgoIso(3), {
+        now: pickDisplayNow(props.asOfMs, props.asOfMs + 10 * 3_600_000),
+      }),
+    ).toBe("13 saat önce");
+  });
+
+  describe("the as-of line", () => {
+    const AS_OF_ISO = new Date(NOW_MS).toISOString();
+    // NOW_MS is 2026-11-01T12:00Z, which is 15:00 in Istanbul (UTC+3): the fixed stamp
+    // the server renders, whatever the reader's zone or the age of the copy.
+    const AS_OF_STAMP = "1 Kasım 2026 15:00";
+    const AS_OF_MARKUP =
+      `<p class="text-xs text-muted-foreground">Akış durumlarının derlenme zamanı: ` +
+      `<time dateTime="${AS_OF_ISO}">${AS_OF_STAMP}</time> ` +
+      `(<time dateTime="${AS_OF_ISO}">az önce</time>).</p>`;
+    const inOneHour = new Date(NOW_MS + 3_600_000).toISOString();
+    const frozen = { status: 200, failStreak: 0, newest: "2026-10-02T14:41:30Z", items: 12 };
+
+    async function asOfLine(tree: unknown) {
+      const lines = await paragraphsContaining(tree, "derlenme zamanı");
+      expect(lines).toHaveLength(1);
+      return lines[0] as TreeElement;
+    }
+
+    it.each<{
+      name: string;
+      setup: () => void;
+    }>([
+      { name: "a healthy directory (no quarantined, no frozen feed)", setup: () => undefined },
+      {
+        name: "a quarantined feed",
+        setup: () => {
+          supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour, "s-wire": inOneHour };
+        },
+      },
+      {
+        name: "a frozen feed",
+        setup: () => {
+          supabaseFixture.feedBySlug = { "s-outlet": frozen };
+        },
+      },
+      {
+        name: "both a quarantined and a frozen feed",
+        setup: () => {
+          supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour };
+          supabaseFixture.feedBySlug = { "s-wire": frozen };
+        },
+      },
+    ])("is always rendered, holding <RelativeTime iso={asOf} nowMs={asOfMs} />: $name", async ({ setup }) => {
+      setup();
+
+      const line = await asOfLine(await SourcesPage());
+
+      expect(findByType(line, RelativeTime)?.props).toEqual({ iso: AS_OF_ISO, nowMs: NOW_MS });
+      expect(renderToStaticMarkup(line as unknown as ReactNode)).toBe(AS_OF_MARKUP);
+      expect(await collectHrefs(line)).toEqual([]);
+    });
+
+    it("dates only what asOfMs decided (the markers, the delivering figure, the last-seen ages), never the weekly counts", async () => {
+      // The weekly counts come from getSourceItemsPerDay's own cache entry (shared
+      // with /kaynaklar/durum), which fills on its own schedule: asOfMs says nothing about it.
+      const line = await asOfLine(await SourcesPage());
+
+      expect((await collectText(line)).join("")).not.toContain("haber sayıları");
+      expect(renderToStaticMarkup(line as unknown as ReactNode)).not.toContain("haber sayıları");
+    });
+
+    it("server text is the Istanbul-pinned stamp of NOW_MS plus 'az önce'; the relative part reads '19 saat önce' for a reader whose clock is 19 h ahead", async () => {
+      const line = await asOfLine(await SourcesPage());
+      const { iso, nowMs } = findByType(line, RelativeTime)?.props as { iso: string; nowMs: number };
+
+      // The raw HTML of an old copy still says 'az önce' for the relative part (the server
+      // clock IS the fill clock), but the fixed stamp beside it dates the copy for a reader
+      // without JS: the line never claims 'just now' on its own.
+      const markup = renderToStaticMarkup(line as unknown as ReactNode);
+      expect(markup).toContain(`<time dateTime="${AS_OF_ISO}">${AS_OF_STAMP}</time>`);
+      expect(markup).toContain(`(<time dateTime="${AS_OF_ISO}">az önce</time>)`);
+      expect(formatTurkishTimeAgo(iso, { now: nowMs })).toBe("az önce");
+      expect(formatTurkishTimeAgo(iso, { now: pickDisplayNow(nowMs, nowMs + 19 * 3_600_000) })).toBe(
+        "19 saat önce",
+      );
+    });
+
+    it("still reads correctly for a tab left open past 48 h: the relative part goes absolute inside the parentheses, no '... 2026 derlendi'", async () => {
+      const line = await asOfLine(await SourcesPage());
+      const { iso, nowMs } = findByType(line, RelativeTime)?.props as { iso: string; nowMs: number };
+
+      // visibilitychange re-bases RelativeTime to the reader's clock; 49 h on, the age
+      // helper prints a bare date.
+      expect(
+        formatTurkishTimeAgo(iso, { now: pickDisplayNow(nowMs, nowMs + 49 * 3_600_000) }),
+      ).toBe(formatTurkishDate(iso));
+      // The static copy no longer ends in '<year> derlendi.': the date sits in a label
+      // sentence that ends with '(...).', so it needs no locative suffix.
+      const text = (await collectText(line)).join("");
+      expect(text).not.toMatch(/\d{4} derlendi/);
+      expect(text).not.toContain("derlendi");
+      expect(text).toMatch(/^Akış durumlarının derlenme zamanı: .+\)\.$/);
+    });
+
+    it("is its own paragraph, outside the quarantine/frozen sentence, and that sentence keeps its 'Kaynak durumu' link", async () => {
+      supabaseFixture.quarantinedUntilBySlug = { "s-outlet": inOneHour };
+      const tree = await SourcesPage();
+
+      const line = await asOfLine(tree);
+      const counts = await paragraphsContaining(tree, "kaynağın beslemesi şu anda alınamıyor.");
+
+      expect(counts).toHaveLength(1);
+      expect(counts[0]).not.toBe(line);
+      expect(await collectHrefs(counts[0])).toEqual(["/kaynaklar/durum"]);
+      expect((await collectText(counts[0])).join("")).toContain("Kaynak durumu");
+      expect((await collectText(counts[0])).join("")).not.toContain("derlenme zamanı");
+    });
+
+    it("is part of the page shell, not of the streamed directory: it is in the tree before any Suspense child resolves", async () => {
+      const tree = await SourcesPage();
+      const line = await asOfLine(tree);
+
+      expect(findSuspenses(line)).toEqual([]);
+      expect(findSuspenses(tree)).toHaveLength(1);
+    });
+
+    it("is absent from the error state, which has no directory to date", async () => {
+      supabaseFixture.fail = true;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const text = (await collectText(await SourcesPage())).join(" ");
+        expect(text).toContain("Kaynak listesi şu an yüklenemedi");
+        expect(text).not.toContain("derlenme zamanı");
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 });
 
-describe("SourceDirectory -- renders lastSeenLabel", () => {
-  const render = (lastSeenLabel: string | null) =>
+describe("SourceDirectory -- prints the last-seen age through RelativeTime (h205-kaynak-1)", () => {
+  const render = (lastPublishedAt: string | null, asOfMs: number = NOW_MS) =>
     renderToStaticMarkup(
       createElement(SourceDirectory, {
         grouped: {
-          pro_government: [
-            { ...GZT, lastPublishedAt: "2026-10-31T08:00:00.000Z", lastSeenLabel },
-          ],
+          pro_government: [{ ...GZT, lastPublishedAt }],
         } as unknown as GroupedSources,
         countLabel: "12 haber",
+        asOfMs,
       }),
     );
-  const TIME_LINE = /<p class="text-\[10px\] text-muted-foreground">([^<]*)<\/p>/;
+  const TIME_LINE =
+    /<p class="text-\[10px\] text-muted-foreground"><time dateTime="([^"]*)">([^<]*)<\/time><\/p>/;
 
-  it("shows the given label under the card, verbatim, instead of deriving one from the clock", () => {
-    const markup = render("3 saat önce");
+  it("prints the age against asOfMs inside <time>, under the count line", () => {
+    const markup = render("2026-10-31T08:00:00.000Z");
 
-    expect(TIME_LINE.exec(markup)?.[1]).toBe("3 saat önce");
+    const hit = TIME_LINE.exec(markup);
+    expect(hit?.[1]).toBe("2026-10-31T08:00:00.000Z");
+    expect(hit?.[2]).toBe(formatTurkishTimeAgo("2026-10-31T08:00:00.000Z", { now: NOW_MS }));
+    expect(hit?.[2]).toBe("1 gün önce");
     expect(markup.match(/önce/g)).toHaveLength(1);
+    expect(markup.indexOf("12 haber")).toBeLessThan(markup.indexOf("<time"));
   });
 
-  it("renders no time line when the source has no label", () => {
-    expect(TIME_LINE.test(render(null))).toBe(false);
+  it("counts from the asOfMs it is given, never from the wall clock", () => {
+    const publishedAt = new Date(NOW_MS - 3 * 3_600_000).toISOString();
+
+    expect(TIME_LINE.exec(render(publishedAt, NOW_MS))?.[2]).toBe("3 saat önce");
+    expect(TIME_LINE.exec(render(publishedAt, NOW_MS + 3 * 3_600_000))?.[2]).toBe("6 saat önce");
+  });
+
+  it("renders no time line when the source has no lastPublishedAt", () => {
+    const markup = render(null);
+
+    expect(TIME_LINE.test(markup)).toBe(false);
+    expect(markup).not.toContain("<time");
+  });
+
+  it("hands <RelativeTime> exactly { iso, nowMs } and nothing else", () => {
+    const element = SourceDirectory({
+      grouped: {
+        pro_government: [{ ...GZT, lastPublishedAt: "2026-10-31T08:00:00.000Z" }],
+      } as unknown as GroupedSources,
+      countLabel: "12 haber",
+      asOfMs: NOW_MS,
+    });
+    const found: unknown[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return void node.forEach(walk);
+      if (node && typeof node === "object") {
+        const el = node as TreeElement;
+        if (el.type === RelativeTime) found.push(el.props);
+        if (el.props?.children !== undefined) walk(el.props.children);
+      }
+    };
+    walk(element);
+
+    expect(found).toEqual([{ iso: "2026-10-31T08:00:00.000Z", nowMs: NOW_MS }]);
   });
 });
 
@@ -1822,7 +2078,7 @@ describe("/sources page -- quarantined feeds are visible (h47-sources-1)", () =>
 
     vi.setSystemTime(NOW_MS + 10 * 3_600_000);
     const markup = renderToStaticMarkup(
-      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber" }),
+      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber", asOfMs: NOW_MS }),
     );
 
     expect(countOf(markup, MARKER)).toBe(1);
@@ -1837,6 +2093,7 @@ describe("SourceDirectory -- the 'Akış alınamıyor' card marker (h47-sources-
           pro_government: [{ ...GZT, quarantined }],
         } as unknown as GroupedSources,
         countLabel: "0 haber",
+        asOfMs: NOW_MS,
       }),
     );
 
@@ -1898,6 +2155,7 @@ describe("SourceDirectory -- the 'Akış alınamıyor' card marker (h47-sources-
             pro_government: [{ ...GZT, kind, quarantined: true }],
           } as unknown as GroupedSources,
           countLabel: "0 haber",
+          asOfMs: NOW_MS,
         }),
       );
 
@@ -1948,6 +2206,7 @@ describe("SourceDirectory -- the 'Akış alınamıyor' card marker (h47-sources-
           pro_government: [{ ...GZT, quarantined: true }],
         } as unknown as GroupedSources,
         countLabel: "0 haber",
+        asOfMs: NOW_MS,
       }),
     );
     expect(markup).not.toContain("opacity-70");
@@ -2030,7 +2289,7 @@ describe("/sources page -- frozen feeds are visible (h103-sourcescores-2)", () =
   }
   async function cardsMarkup(): Promise<string> {
     return renderToStaticMarkup(
-      createElement(SourceDirectory, { grouped: await groupedProps(), countLabel: "0 haber" }),
+      createElement(SourceDirectory, { grouped: await groupedProps(), countLabel: "0 haber", asOfMs: NOW_MS }),
     );
   }
 
@@ -2247,7 +2506,7 @@ describe("/sources page -- frozen feeds are visible (h103-sourcescores-2)", () =
     };
     const grouped = await groupedProps();
     vi.setSystemTime(FROZEN_NOW + 10 * 3_600_000);
-    const markup = renderToStaticMarkup(createElement(SourceDirectory, { grouped, countLabel: "0 haber" }));
+    const markup = renderToStaticMarkup(createElement(SourceDirectory, { grouped, countLabel: "0 haber", asOfMs: NOW_MS }));
     expect(countOf(markup, MARKER)).toBe(1);
   });
 
@@ -2349,6 +2608,7 @@ describe("SourceDirectory -- the 'Akış donmuş' card marker (h103-sourcescores
       createElement(SourceDirectory, {
         grouped: { pro_government: [{ ...GZT, ...row }] } as unknown as GroupedSources,
         countLabel: "0 haber",
+        asOfMs: NOW_MS,
       }),
     );
   const MARKER_LINK = /<a\b[^>]*\bhref="\/kaynaklar\/durum"[^>]*>Akış donmuş<\/a>/;
@@ -2481,7 +2741,7 @@ describe("/sources page -- kayyum status is visible on the cards (h122-sourcepag
   }
   async function cardsMarkup(): Promise<string> {
     return renderToStaticMarkup(
-      createElement(SourceDirectory, { grouped: await groupedProps(), countLabel: "0 haber" }),
+      createElement(SourceDirectory, { grouped: await groupedProps(), countLabel: "0 haber", asOfMs: NOW_MS }),
     );
   }
   /** The markup of the card whose profile link points at /source/<slug>. */
@@ -2623,6 +2883,7 @@ describe("SourceDirectory -- the kayyum card badge (h122-sourcepages-2)", () => 
       createElement(SourceDirectory, {
         grouped: { pro_government: [{ ...GZT, ...row }] } as unknown as GroupedSources,
         countLabel: "0 haber",
+        asOfMs: NOW_MS,
       }),
     );
 

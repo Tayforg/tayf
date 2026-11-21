@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   formatTurkishTimeAgo,
   formatTurkishDate,
+  formatTurkishDateTime,
   ABSOLUTE_AFTER_MS,
 } from "./time";
 
@@ -103,5 +104,25 @@ describe("formatTurkishDate", () => {
 
   it("returns '' for an empty string", () => {
     expect(formatTurkishDate("")).toBe("");
+  });
+});
+
+describe("formatTurkishDateTime", () => {
+  it("prints the day, month, year and hh:mm of the instant in Europe/Istanbul", () => {
+    expect(formatTurkishDateTime("2026-11-21T11:05:00Z")).toBe("21 Kasım 2026 14:05");
+    expect(formatTurkishDateTime("2026-11-01T12:00:00.000Z")).toBe("1 Kasım 2026 15:00");
+  });
+
+  it("pins Europe/Istanbul regardless of the runtime TZ, across midnight", () => {
+    // 21:30 UTC is 00:30 the *next* day in Istanbul: date and hour both roll over.
+    expect(formatTurkishDateTime("2026-09-01T21:30:00Z")).toBe("2 Eylül 2026 00:30");
+  });
+
+  it("returns '' for an unparseable input", () => {
+    expect(formatTurkishDateTime("not-a-date")).toBe("");
+  });
+
+  it("returns '' for an empty string", () => {
+    expect(formatTurkishDateTime("")).toBe("");
   });
 });

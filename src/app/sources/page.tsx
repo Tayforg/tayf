@@ -19,6 +19,7 @@ export const metadata: Metadata = staticPageMetadata({
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import { BiasBadge } from "@/components/story/bias-badge";
+import { RelativeTime } from "@/components/story/relative-time";
 import { SourceChips } from "@/components/source/source-chips";
 import { SourceBadge } from "@/components/story/source-badge";
 import { DenominatorNote } from "@/components/source/denominator-note";
@@ -31,8 +32,8 @@ import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { getSourceItemsPerDay, isRowQuarantined } from "@/lib/sources/feed-status";
 import { classifySilence } from "@/lib/sources/silence-reason";
 import { weeklyCountFromPerDay, sortGroupedByActivity } from "@/lib/sources/directory";
-import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
+import { formatTurkishDateTime } from "@/lib/time";
 import { createSlowReaderClient } from "@/lib/supabase/server";
 import { buildRegistryDataset, serializeJsonLd } from "@/lib/seo/json-ld";
 import { NEW_TAB_NOTICE } from "@/components/ui/new-tab-hint";
@@ -61,18 +62,34 @@ import type { BiasCategory, Source } from "@/types";
 // first request after every deploy ran the function cold path plus the
 // uncached directory read and weekly-count aggregate itself (4.4-5.6 s total
 // against 0.5 s warm). Now the body has no clock and no request API: every
-// clock-dependent value (the "N/M kaynak" delivering figure, each card's
-// "3 saat önce" label) is stamped INSIDE the cached read, at fill time, so the
-// build fills the cache and ships the finished page. A label can therefore be
-// as old as the cache window (5 min revalidate) — the same freshness the
-// weekly counts already had. The JSON-LD `dateModified` is the exception: it
-// is NOT clock-derived. It is the registry's last change time, read from the
-// database (registryModifiedAt), so it stays put across cache fills and is
-// left out when it cannot be known.
+// clock-dependent value (the "N/M kaynak" delivering figure, the "Akış
+// alınamıyor" / "Akış donmuş" markers) is decided INSIDE the cached read, at
+// fill time, and the read hands back the clock it used as `asOfMs`, so the
+// build fills the cache and ships the finished page. The JSON-LD
+// `dateModified` is the exception: it is NOT clock-derived. It is the
+// registry's last change time, read from the database (registryModifiedAt), so
+// it stays put across cache fills and is left out when it cannot be known.
 //
-// Cached for 5 minutes (`source-directory`) — the source directory shifts on
-// the order of weeks, and the recent-activity counter only needs to feel
-// "fresh", not real-time.
+// Those fill-time values are NOT bounded by the 5-minute revalidate window
+// (h205-kaynak-1). `source-directory` is stale 60 s / revalidate 300 s / expire
+// 3600 s, and after an idle spell the first reader is served the stale
+// prerender shell AND the stale "use cache" entry, stacked; a hunter capture
+// carried data 19.5 h old, a healthy feed shown as "Akış alınamıyor" and a
+// source last seen "2 saat önce" that was 23 h old. So no age is baked into
+// the HTML as a string. Each card prints its last-seen age through
+// <RelativeTime iso nowMs={asOfMs} />: its first render is the server text
+// (hydration cannot mismatch) and after mount it re-bases to the reader's
+// clock. The page also says when it was compiled ("Akış durumlarının derlenme
+// zamanı: <fixed Istanbul stamp> (<relative part>)", the same component on
+// `asOfMs`); the markers, the delivering figure and the last-seen ages stay
+// fill-time facts, and that line is what qualifies them. It does NOT date the
+// weekly counts: those come from getSourceItemsPerDay's own cache entry (shared
+// with /kaynaklar/durum), which fills on its own schedule, so the line never
+// names them. tests/guards/sources-relative-time.test.ts holds the line.
+//
+// Cached through the `source-directory` lifetime (5 min revalidate, 1 h
+// expire) — the source directory shifts on the order of weeks, and the
+// recent-activity counter only needs to feel "fresh", not real-time.
 //
 // Each row also carries `kind` (outlet/aggregator/wire/niche — migration
 // 034). Only "outlet" and "wire" vote in bias_distribution / blindspot /
@@ -94,13 +111,13 @@ interface SourceRow extends Omit<Source, "trustee_since"> {
    * "Kayyum · dd.mm.yyyy" and renders nothing for null or an unparseable value.
    */
   trusteeSince: string | null;
-  lastPublishedAt: string | null;
   /**
-   * "3 saat önce", formatted when the directory was read (cache fill time), so
-   * rendering it never touches the clock. Null when the source published
-   * nothing in the read's 7-day window.
+   * The source's newest article in the read's 7-day window, as stored (ISO), or
+   * null when it published nothing in it. The card prints its age through
+   * <RelativeTime iso nowMs={asOfMs} /> (h205-kaynak-1), so no formatted label
+   * is stamped on the row and rendering never touches the clock.
    */
-  lastSeenLabel: string | null;
+  lastPublishedAt: string | null;
   /**
    * True while the source's feed is in ingest quarantine (`fetch_quarantined_until`
    * still in the future), decided when the directory was read (cache fill time),
@@ -128,6 +145,16 @@ type GroupedSources = Record<BiasCategory, SourceRow[]>;
 /** What one directory read returns: the rows plus every value derived from the clock. */
 interface SourcesDirectory {
   grouped: GroupedSources;
+  /**
+   * The clock the read took after its rows were in hand (epoch ms): the instant
+   * every fill-time value on the page (quarantined, feedFrozen, the delivering
+   * figure) was decided against. The page prints it as the "derlenme zamanı"
+   * line and hands it to every <RelativeTime> as `nowMs` (h205-kaynak-1), so an
+   * age is always counted from the same instant the verdicts were taken. It is
+   * not the clock of the weekly counts, which come from getSourceItemsPerDay's
+   * own cache entry (shared with /kaynaklar/durum) and are not dated by it.
+   */
+  asOfMs: number;
   /**
    * When the registry last changed, as an ISO instant: the dataset JSON-LD's
    * `dateModified`. Derived from the database (see registryModifiedAt), never
@@ -385,7 +412,7 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
       ...rest
     } = source;
     const lastPublishedAt = latest[0]?.published_at ?? null;
-    // h47-sources-1: the same fill-time anchor as the label below, no new clock read.
+    // h47-sources-1: the same fill-time anchor as `asOfMs` below, no new clock read.
     const quarantined = isRowQuarantined(quarantinedUntil, nowMs);
     // correctness-1: the delivering predicate of deriveDirectoryStats, on the
     // same fill-time anchor. Only a SILENT source is classified (as on
@@ -398,9 +425,6 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
       ...rest,
       trusteeSince: trusteeSince ?? null,
       lastPublishedAt,
-      lastSeenLabel: lastPublishedAt
-        ? formatTurkishTimeAgo(lastPublishedAt, { now: nowMs })
-        : null,
       quarantined,
       // h103-sourcescores-2: /kaynaklar/durum's own rule on the same anchor. A
       // quarantined feed classifies as 'erisim_yok' there, so it is never frozen
@@ -425,6 +449,7 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
 
   return {
     grouped,
+    asOfMs: nowMs,
     registryModifiedIso,
     ...deriveDirectoryStats(grouped, nowMs),
   };
@@ -503,8 +528,14 @@ export default async function SourcesPage() {
     );
   }
 
-  const { grouped, registryModifiedIso, votingSources, votingDelivering } =
+  const { grouped, asOfMs, registryModifiedIso, votingSources, votingDelivering } =
     result.directory;
+  // h205-kaynak-1: the as-of instant as an ISO string, for <RelativeTime iso>.
+  // `new Date(asOfMs)` is a conversion of the read's own stamp, not a clock read.
+  const asOfIso = new Date(asOfMs).toISOString();
+  // The fixed, Istanbul-pinned stamp printed beside the relative part: a format of the
+  // read's own instant, not a clock read, so the static-page-clock rule holds.
+  const asOfLabel = formatTurkishDateTime(asOfIso);
 
   const totalSources = BIAS_ORDER.reduce(
     (acc, bias) => acc + (grouped[bias]?.length ?? 0),
@@ -594,6 +625,21 @@ export default async function SourcesPage() {
           </Link>
         </p>
       ) : null}
+      {/* h205-kaynak-1: always shown, whatever the counts above are. The markers,
+          the delivering figure and the last-seen ages on this page are fill-time
+          facts, and a served copy can be hours old (see the header comment); this
+          line says when they were compiled. The weekly counts come from
+          getSourceItemsPerDay's own cache entry (shared with /kaynaklar/durum),
+          so they are not dated by this line and it never names them. Server
+          text: the fixed Istanbul stamp of asOfMs plus "az önce", so the raw
+          HTML of an old copy still carries its date. The relative part re-bases
+          to the reader's clock after mount like every card age; the label form
+          reads correctly whether it ends up "az önce", "N saat önce" or a bare
+          date past 48 h. */}
+      <p className="text-xs text-muted-foreground">
+        Akış durumlarının derlenme zamanı:{" "}
+        <time dateTime={asOfIso}>{asOfLabel}</time> (<RelativeTime iso={asOfIso} nowMs={asOfMs} />).
+      </p>
       <p className="text-xs text-muted-foreground">
         Doğruluk ve sahiplik etiketi girilen kaynak:{" "}
         <span className="font-mono">
@@ -604,7 +650,7 @@ export default async function SourcesPage() {
       </p>
 
       <Suspense fallback={<SourceDirectorySkeleton />}>
-        <SourceDirectoryWithCounts grouped={grouped} perDay={perDayPromise} />
+        <SourceDirectoryWithCounts grouped={grouped} perDay={perDayPromise} asOfMs={asOfMs} />
       </Suspense>
       {karne ? (
         <ClickbaitKarneSection karne={karne} check={CLICKBAIT_PRECISION_CHECK} />
@@ -640,11 +686,15 @@ function countLabelFromCounts(
 export async function SourceDirectoryWithCounts({
   grouped,
   perDay: perDayPromise,
+  asOfMs,
 }: {
   grouped: GroupedSources;
   // Started by SourcesPage before the directory read (see the note there);
   // awaited here so the read overlaps instead of queueing behind the page body.
   perDay: ReturnType<typeof getSourceItemsPerDay>;
+  // The directory read's own clock (SourcesDirectory.asOfMs), passed on to every
+  // card's <RelativeTime>. Required: a caller that forgets it fails typecheck.
+  asOfMs: number;
 }) {
   const perDay = await perDayPromise;
   const weekly =
@@ -661,6 +711,7 @@ export async function SourceDirectoryWithCounts({
     <SourceDirectory
       grouped={sorted}
       countLabel={(slug) => countLabelFromCounts(weekly, slug)}
+      asOfMs={asOfMs}
     />
   );
 }
@@ -670,9 +721,13 @@ export async function SourceDirectoryWithCounts({
 export function SourceDirectory({
   grouped,
   countLabel,
+  asOfMs,
 }: {
   grouped: GroupedSources;
   countLabel: string | ((slug: string) => string);
+  // The instant each card's last-seen age is counted to on the server render
+  // (h205-kaynak-1); <RelativeTime> re-bases it to the reader's clock.
+  asOfMs: number;
 }) {
   return (
     <>
@@ -744,9 +799,9 @@ export function SourceDirectory({
                         <p className="text-muted-foreground">
                           <span className="font-mono text-[10px]">{label}</span>
                         </p>
-                        {source.lastSeenLabel && (
+                        {source.lastPublishedAt && (
                           <p className="text-[10px] text-muted-foreground">
-                            {source.lastSeenLabel}
+                            <RelativeTime iso={source.lastPublishedAt} nowMs={asOfMs} />
                           </p>
                         )}
                       </div>
