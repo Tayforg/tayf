@@ -8,7 +8,7 @@ import {
 } from "./in-feed-match";
 import { expectLinear, rep } from "../../../tests/_helpers/linear-time";
 import { expandAliasQuery } from "./search-aliases";
-import { canonicalSearchQuery } from "./turkish-query";
+import { canonicalSearchQuery, foldTr } from "./turkish-query";
 
 // In-feed filter for the home search: every query token must occur at a word
 // start in the cluster title. The matching is order-free, ignores quotes and
@@ -828,6 +828,104 @@ describe("titleMatchesTokens: a two-letter token needs a whole word (h116-search
 });
 
 // ---------------------------------------------------------------------------
+// h206-search-1: the archive now searches 'affı' and 'affın' for a typed 'af' (turkish-query.ts, rule B': the stemmer
+// stores 'affı' whole and cuts 'affın' / 'affına' / 'affını' / 'affımız' to the bare 'aff', so the root never met the
+// 40 live clusters that hold only affı/aff/affın). The cards above the archive section must agree. A two-letter token
+// is a whole word or a root plus a Turkish suffix, and 'affı' is neither ('f' + 'ı' is not a suffix of 'af'), so 'af'
+// also accepts a word that is 'af' + its last consonant doubled + a Turkish suffix tail ('affı', 'affın'). The card
+// filter is deliberately a little more lenient than the archive ('affa' would pass it, as 'zam' passes 'zamlar' by the
+// 3-letter prefix rule). Three-letter roots (zam) prefix-match already; 'sır' is not a doubled root at all (db-LOW-1).
+// ---------------------------------------------------------------------------
+
+describe("titleMatchesTokens: 'af' also finds the doubled form 'affı' (h206-search-1)", () => {
+  it.each([
+    "Öğrenci affı Komisyon'da kabul edildi",
+    "ÖĞRENCİ AFFI SON DAKİKA",
+    "Öğrenci affı için tarih verildi",
+    "Vergi affının şartları belli oldu",
+    "Af kanunu Meclis'te",
+    "Genel af talebi",
+    "Affı isteyenler toplandı",
+    "Yeni af düzenlemesi geliyor",
+    // 'aff' + the dative 'a' (isTurkishSuffixTail accepts the bare a / e dative).
+    "Affa dair konuşma",
+  ])("'af' matches %j", (title) => {
+    expect(matches("af", title)).toBe(true);
+  });
+
+  it.each([
+    "Afrika Birliği zirvesi",
+    "Afyon'da kar yağışı",
+    "Afganistan'da seçim",
+    "Afişler toplatıldı",
+    "Bakan Affedilmez dedi",
+    "Aff tek başına",
+    "Başkan açıklama yaptı",
+    "Kafası karışık",
+  ])("'af' does not match %j", (title) => {
+    expect(matches("af", title)).toBe(false);
+  });
+
+  it("'AF' and 'Af' typed in capitals or Turkish casing read like 'af'", () => {
+    for (const q of ["AF", "Af", "aF"]) {
+      expect(matches(q, "Öğrenci affı Komisyon'da kabul edildi"), q).toBe(true);
+      expect(matches(q, "Afrika Birliği zirvesi"), q).toBe(false);
+      expect(matches(q, "Afyon'da kar"), q).toBe(false);
+    }
+  });
+
+  it("works beside other tokens, in any order", () => {
+    expect(matches("öğrenci af", "Öğrenci affı Komisyon'da kabul edildi")).toBe(true);
+    expect(matches("af öğrenci", "Öğrenci affı Komisyon'da kabul edildi")).toBe(true);
+    expect(matches("öğrenci af", "Öğrenci Afrika turu")).toBe(false);
+    expect(matches("komisyon af", "Öğrenci affı Komisyon'da kabul edildi")).toBe(true);
+  });
+
+  it("goes through the page's alternatives too (no alias for 'af': one token list)", () => {
+    expect(searchTokenAlternatives("af")).toEqual([["af"]]);
+    expect(matchesAlt("af", "Öğrenci affı Komisyon'da kabul edildi")).toBe(true);
+    expect(matchesAlt("af", "Afrika Birliği zirvesi")).toBe(false);
+  });
+
+  it("the list is closed: another two-letter token does not take its doubled form ('ak' / 'akkı', 'ab' / 'abbı')", () => {
+    expect(titleMatchesTokens("Akkı yüzünden", ["ak"])).toBe(false);
+    expect(titleMatchesTokens("Abbı geldi", ["ab"])).toBe(false);
+  });
+
+  it("the doubled stem must start a word and carry a Turkish suffix tail: a mid-word hit and a bare 'aff' do not count", () => {
+    expect(titleMatchesTokens("Kaffı yazdı", ["af"])).toBe(false);
+    expect(titleMatchesTokens("Kaffın sonu", ["af"])).toBe(false);
+    expect(titleMatchesTokens("Aff", ["af"])).toBe(false);
+    expect(titleMatchesTokens("Affın kapsamı", ["af"])).toBe(true);
+  });
+
+  // db-LOW-1: the archive does NOT search 'sırrı' for a typed 'sır' ('sırrı' is also the given name Sırrı, the same lexeme).
+  // The cards still match it, because every 3-letter token prefix-matches a longer word (the rule that predates h206-search-1),
+  // so this test only pins that old prefix rule and says nothing about what the archive searches.
+  it("three-letter tokens prefix-match a longer word on the cards, as before ('zam' / 'zammı', and 'sır' / 'sırrı' by the plain prefix rule)", () => {
+    expect(matches("zam", "Benzine zammı geldi")).toBe(true);
+    expect(matches("benzin zam", "Benzin zammı ABD'yi de vurdu")).toBe(true);
+    expect(matches("kira zam", "Kira zammı yüzde 25 olacak")).toBe(true);
+    expect(matches("sır", "Devlet sırrı ifşa edildi")).toBe(true);
+    expect(matches("sir", "Devlet sırrı ifşa edildi")).toBe(true);
+  });
+
+  // db-LOW-2: the archive's third variant is the genitive 'affın' (stem 'aff': affın, affımız, ...), so the cards must take the
+  // genitive too. The card filter is deliberately a little more lenient ('affa' passes) and a little narrower than the
+  // archive on the dative / accusative of the possessive ('affına', 'affını' are archive-only); the in-feed code is unchanged.
+  it("the genitive stem forms 'affın' and 'affımız' are accepted on the cards", () => {
+    for (const title of ["Affın kapsamı genişledi", "Affımız için bekleyin"]) {
+      expect(titleMatchesTokens(title, ["af"]), title).toBe(true);
+    }
+  });
+
+  it("copes with a long title that repeats the doubled stem inside longer words (bounded walk)", () => {
+    expect(titleMatchesTokens(`${"affedilmez ".repeat(20_000)}affı`, ["af"])).toBe(true);
+    expect(titleMatchesTokens(`${"affedilmez ".repeat(20_000)}afyon`, ["af"])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // h116-search-2: spelling variants of one foreign name. On production (2026-11-11)
 // the live pages for 'Erakçi' and 'Arakçi' shared 0 of 24 ids, 'Hamenei' found
 // nothing while 'Hamaney' had 11+ stories. The archive expands those queries
@@ -964,6 +1062,79 @@ describe("foreign-name spelling aliases in the feed (h116-search-2)", () => {
   it("a two-letter query is unaffected by the alias tables ('ab' is no alias)", () => {
     expect(searchTokenAlternatives("AB")).toEqual([["ab"]]);
     expect(searchTokenAlternatives("bm")).toEqual([["bm"]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h206-search-2: 'Kalibaf' and 'Galibaf' are one name (Iran's parliament speaker). The archive expands the
+// query (search-aliases.ts), so the cards must too, or the page lists the other spelling's stories below.
+// ---------------------------------------------------------------------------
+
+describe("Kalibaf / Galibaf spelling aliases in the feed (h206-search-2)", () => {
+  const kalibaf = "Kalibaf: ABD savaşır veya çekilirse kaybedecek";
+  const galibaf = "Galibaf: ABD ile müzakere şartları açıklandı";
+
+  it("searchTokenAlternatives adds the other spelling after the typed one", () => {
+    expect(searchTokenAlternatives("Kalibaf")).toEqual([["kalibaf"], ["galibaf"]]);
+    expect(searchTokenAlternatives("Galibaf")).toEqual([["galibaf"], ["kalibaf"]]);
+    expect(searchTokenAlternatives("Galibaf'ın")).toEqual([["galibaf"], ["kalibaf"]]);
+    expect(searchTokenAlternatives("KALİBAF")).toEqual([["kalibaf"], ["galibaf"]]);
+  });
+
+  it("'galibaf' matches the title 'Kalibaf: ABD savaşır veya çekilirse kaybedecek', and the reverse", () => {
+    expect(matchesAlt("galibaf", kalibaf)).toBe(true);
+    expect(matchesAlt("kalibaf", galibaf)).toBe(true);
+    // Its own spelling still matches, and so does an inflected form of either.
+    expect(matchesAlt("galibaf", galibaf)).toBe(true);
+    expect(matchesAlt("kalibaf", kalibaf)).toBe(true);
+    expect(matchesAlt("galibaf", "Meclis Başkanı Kalibaf’ın açıklaması")).toBe(true);
+    expect(matchesAlt("kalibaf", "Galibaf'tan yeni mesaj")).toBe(true);
+    // Without the alias the first pair does not match: the feed used to show nothing for the other spelling.
+    expect(matches("galibaf", kalibaf)).toBe(false);
+  });
+
+  it("keeps the rest of the query across the alias", () => {
+    expect(matchesAlt("galibaf abd", kalibaf)).toBe(true);
+    expect(matchesAlt("galibaf hürmüz", kalibaf)).toBe(false);
+  });
+
+  it("gives no alternative for the English spelling, a different term or an operator", () => {
+    expect(searchTokenAlternatives("ghalibaf")).toEqual([["ghalibaf"]]);
+    expect(searchTokenAlternatives("kalibafın")).toEqual([["kalibafin"]]);
+    expect(searchTokenAlternatives('"kalibaf"')).toEqual([["kalibaf"]]);
+    expect(searchTokenAlternatives("kalibaf -abd")).toEqual([["kalibaf"]]);
+    expect(searchTokenAlternatives("kalibaf or galibaf")).toEqual([["kalibaf", "galibaf"]]);
+    expect(matchesAlt("galibaf", "Ghalibaf ile görüştü")).toBe(false);
+  });
+
+  it("does not pull in an unrelated title", () => {
+    expect(matchesAlt("galibaf", "Kalibre edilen sistem devreye girdi")).toBe(false);
+    expect(matchesAlt("kalibaf", "Galiba yarın yağmur yağacak")).toBe(false);
+    expect(matchesAlt("galibaf", "Galip Öztürk açıklama yaptı")).toBe(false);
+  });
+
+  it("agrees with the archive: alternatives exist exactly when the archive expands, and spell the same disjuncts", () => {
+    for (const q of [
+      "Kalibaf",
+      "Galibaf",
+      "KALİBAF",
+      "Galibaf'ın",
+      "Kalibaf açıklaması",
+      "kalibafın",
+      "ghalibaf",
+      '"kalibaf"',
+      "kalibaf -abd",
+      "kalibaf or galibaf",
+    ]) {
+      const expansion = expandAliasQuery(canonicalSearchQuery(q));
+      const alternatives = searchTokenAlternatives(q);
+      expect(alternatives.length > 1, q).toBe(expansion !== null);
+      if (expansion !== null) {
+        expect(alternatives.map((alt) => alt.join(" ")).sort(), q).toEqual(
+          expansion.foldedQuery.split(" or ").map(foldTr).sort(),
+        );
+      }
+    }
   });
 });
 

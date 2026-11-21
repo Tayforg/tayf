@@ -127,7 +127,7 @@ const ARRAY_ROW = {
 };
 
 describe("getClusterFactChecks", () => {
-  it("records eq(is_published,true) on both sides and limit(3)", async () => {
+  it("records eq(is_published,true) on both sides and limit(6) (3 are kept after filtering)", async () => {
     fixture.data = [OBJECT_ROW];
     await getClusterFactChecks("c1");
     const state = fixture.lastState as BuilderState;
@@ -138,7 +138,7 @@ describe("getClusterFactChecks", () => {
         { col: "fact_checks.is_published", val: true },
       ]),
     );
-    expect(state.limit).toBe(3);
+    expect(state.limit).toBe(6);
   });
 
   it("maps the object embed shape", async () => {
@@ -199,6 +199,167 @@ describe("getClusterFactChecks", () => {
     fixture.lastState = null;
     const result = await getClusterFactChecks("c1");
     expect(result).toEqual([]);
+    expect(fixture.lastState).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h206-story-1: legacy keyword-v1 auto links the v2 name-span rule rejects are
+// hidden at read time (the cron never demotes a published row, and nothing is
+// written). Titles and matched_terms are the real audited rows
+// (docs/fact-checks.md, post-launch precision audit).
+// ---------------------------------------------------------------------------
+
+const FIDAN_FACT_CHECK = {
+  id: "fc-fidan",
+  publisher: "teyit",
+  url: "https://teyit.org/analiz/hakan-fidan-almanca",
+  title: "Hakan Fidan'ın Almanca konuştuğu video gerçek mi?",
+  published_at: "2026-10-13T10:00:00Z",
+  is_published: true,
+};
+
+const FIDAN_MATCHED = ["hakan", "fidan", "konus"];
+
+const NASA_FACT_CHECK = {
+  id: "fc-nasa",
+  publisher: "teyit",
+  url: "https://teyit.org/analiz/nasa-deniz-burnham",
+  title: "NASA astronotu Deniz Burnham’ın Türkçe konuştuğu video gerçek",
+  published_at: "2026-10-09T10:00:00Z",
+  is_published: true,
+};
+
+function linkRow(
+  fc: typeof FIDAN_FACT_CHECK,
+  over: { score?: number; method?: string; decided_by?: string; matched_terms?: string[] | null },
+) {
+  return {
+    score: over.score ?? 0.667,
+    method: over.method ?? "keyword-v1",
+    decided_by: over.decided_by ?? "auto",
+    matched_terms: over.matched_terms === undefined ? FIDAN_MATCHED : over.matched_terms,
+    fact_checks: fc,
+  };
+}
+
+describe("getClusterFactChecks hides rejected legacy links (h206-story-1)", () => {
+  it("selects method, decided_by and matched_terms next to the embed", async () => {
+    fixture.data = [OBJECT_ROW];
+    await getClusterFactChecks("c1");
+    const state = fixture.lastState as BuilderState;
+    const select = String(state.selectArgs[0]);
+    expect(select).toContain("method");
+    expect(select).toContain("decided_by");
+    expect(select).toContain("matched_terms");
+    expect(select).toContain("score");
+    expect(select).toContain("fact_checks!inner ( id, publisher, url, title, published_at, is_published )");
+  });
+
+  it("drops a keyword-v1 / auto Fidan row (name + one claim verb is one distinct term)", async () => {
+    fixture.data = [linkRow(FIDAN_FACT_CHECK, {})];
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+  });
+
+  it("keeps the same row when decided_by = 'admin' (an operator's decision is never overridden)", async () => {
+    fixture.data = [linkRow(FIDAN_FACT_CHECK, { decided_by: "admin" })];
+    const result = await getClusterFactChecks("c1");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ id: "fc-fidan", publisher: "teyit", score: 0.667 });
+  });
+
+  it("keeps the same terms on a keyword-v2 / auto row (v2 already gated it at write time)", async () => {
+    fixture.data = [linkRow(FIDAN_FACT_CHECK, { method: "keyword-v2" })];
+    const result = await getClusterFactChecks("c1");
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe("fc-fidan");
+  });
+
+  it("keeps an on-topic keyword-v1 / auto row (NASA / Deniz Burnham)", async () => {
+    fixture.data = [
+      linkRow(NASA_FACT_CHECK, {
+        score: 0.7,
+        matched_terms: ["nasa", "astro", "deniz", "burnh"],
+      }),
+    ];
+    const result = await getClusterFactChecks("c1");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ id: "fc-nasa", score: 0.7 });
+  });
+
+  it("drops a keyword-v1 / auto row whose matched_terms is null or empty", async () => {
+    fixture.data = [
+      linkRow(NASA_FACT_CHECK, { matched_terms: null }),
+      linkRow(NASA_FACT_CHECK, { matched_terms: [] }),
+    ];
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+  });
+
+  it("keeps a keyword-v1 / admin or keyword-v2 row even with no matched_terms", async () => {
+    fixture.data = [
+      linkRow(NASA_FACT_CHECK, { decided_by: "admin", matched_terms: [] }),
+      linkRow(FIDAN_FACT_CHECK, { method: "keyword-v2", matched_terms: null }),
+    ];
+    const result = await getClusterFactChecks("c1");
+    expect(result.map((r) => r.id)).toEqual(["fc-nasa", "fc-fidan"]);
+  });
+
+  it("evaluates the rule on an array-shaped embed too", async () => {
+    fixture.data = [
+      {
+        score: 0.667,
+        method: "keyword-v1",
+        decided_by: "auto",
+        matched_terms: FIDAN_MATCHED,
+        fact_checks: [FIDAN_FACT_CHECK],
+      },
+    ];
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+  });
+
+  it("four rows with one dropped yield the other three, in the stored score order", async () => {
+    fixture.data = [
+      linkRow(NASA_FACT_CHECK, { score: 0.9, matched_terms: ["nasa", "astro", "deniz", "burnh"] }),
+      linkRow(FIDAN_FACT_CHECK, { score: 0.8 }),
+      { ...OBJECT_ROW, score: 0.7, method: "keyword-v2", decided_by: "auto", matched_terms: ["a", "b", "c"] },
+      { ...ARRAY_ROW, score: 0.65, method: "keyword-v1", decided_by: "admin", matched_terms: [] },
+    ];
+    const result = await getClusterFactChecks("c1");
+    expect(result.map((r) => r.id)).toEqual(["fc-nasa", "fc-1", "fc-2"]);
+    expect(result).toHaveLength(3);
+  });
+
+  it("dropped legacy rows cannot starve the box: 6 rows, 3 dropped, 3 kept", async () => {
+    fixture.data = [
+      linkRow(FIDAN_FACT_CHECK, { score: 0.9 }),
+      linkRow(FIDAN_FACT_CHECK, { score: 0.85 }),
+      linkRow(FIDAN_FACT_CHECK, { score: 0.8 }),
+      linkRow(NASA_FACT_CHECK, { score: 0.7, matched_terms: ["nasa", "astro", "deniz", "burnh"] }),
+      { ...OBJECT_ROW, score: 0.65, method: "keyword-v2", decided_by: "auto", matched_terms: ["a", "b", "c"] },
+      { ...ARRAY_ROW, score: 0.6, method: "keyword-v2", decided_by: "auto", matched_terms: ["a", "b", "c"] },
+    ];
+    const result = await getClusterFactChecks("c1");
+    expect(result.map((r) => r.id)).toEqual(["fc-nasa", "fc-1", "fc-2"]);
+  });
+
+  it("never returns more than 3 even when the wider limit(6) read returns 6 passing rows", async () => {
+    fixture.data = Array.from({ length: 6 }, (_, i) => ({
+      ...OBJECT_ROW,
+      score: 0.9 - i * 0.05,
+      method: "keyword-v2",
+      decided_by: "auto",
+      matched_terms: ["a", "b", "c"],
+      fact_checks: { ...OBJECT_ROW.fact_checks, id: `fc-${i}` },
+    }));
+    const result = await getClusterFactChecks("c1");
+    expect(result.map((r) => r.id)).toEqual(["fc-0", "fc-1", "fc-2"]);
+  });
+
+  it("FACT_CHECK_BOX=off still returns [] with no query (kill switch unchanged)", async () => {
+    process.env.FACT_CHECK_BOX = "off";
+    fixture.data = [linkRow(NASA_FACT_CHECK, { decided_by: "admin" })];
+    fixture.lastState = null;
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
     expect(fixture.lastState).toBeNull();
   });
 });

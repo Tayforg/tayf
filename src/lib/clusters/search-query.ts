@@ -6,11 +6,14 @@ import { ARCHIVE_MAX_PAGE } from "@/lib/seo/home-canonical";
 import { createReaderClient } from "@/lib/supabase/server";
 import { expandAliasQuery } from "./search-aliases";
 import {
+  GEMINATE_DOUBLED_STEM_FORMS,
+  MAX_QUERY_VARIANTS,
   canonicalSearchQuery,
   foldTr,
   holdsLocativeWitness,
   holdsNegatedWord,
   negatedSearchWords,
+  searchDoubledQuery,
   searchFoldedSiblingParts,
   searchSiblingQuery,
   turkishQueryVariants,
@@ -66,6 +69,20 @@ import {
 // An alias in the query (AKP <-> AK Parti, search-aliases.ts) is expanded into a
 // two-way websearch `or` for BOTH arguments, so 'AKP' and 'AK Parti' send the
 // same RPC call; the cache key below stays the canonical query.
+// The reverse of the sibling rule (h206-search-1, turkish-query.ts searchDoubledQuery, rule B'): a typed ROOT of the closed
+// list af / zam also searches its doubled form affı / zammı AND its genitive affın / zammın, because the stemmer stores the
+// doubled form whole, cuts the genitive to the bare doubled stem ('aff', 'zamm', which also covers affına, affını, affımız,
+// zammına) and the root never meets either ('af' listed 24 and 'affı' 24 with one id in common; 'benzin zam' 4 stories,
+// 'benzin zammı' 5). The two doubled spellings are added to the TYPED call's `p_variants` (de-duplicated, at most
+// MAX_QUERY_VARIANTS, Turkish spellings before ASCII ones: typed, accusative, genitive), never to `p_folded`: that stays the
+// typed root, a word-start prefix of the doubled forms, so the 166 guard, the 172 / 194 tiers and migration 216's literal-title
+// filter read the words the reader typed. The ASCII spellings ('affi', 'zammi') are not sent: those lexemes are in 0 live
+// clusters, while 16 clusters hold 'aff' only and 'affın' reaches all 16 of them (replay 2026-11-21, turkish-query.ts rule B').
+// 'sır' is NOT in the list: 'sırrı' is also the given name Sırrı, the same lexeme. Page 1, pages 2 to 4 and the newest-first
+// order all derive from `typedSearchArguments`, so every page and order sends them. An alias query keeps the alias path and gets
+// no doubled form. When the typed spellings already fill every slot ('ışık zam': 3 spellings) the doubled query cannot join
+// them and becomes the SECOND call instead (the accusative query only, not the genitive: a second call is one query), only
+// when there is no root sibling and no folded locative (those win the second call).
 // The RPC returns matching ids ONLY — no per-candidate lateral embed runs
 // before the sort/limit (see 083's header for why an ids-first two-step beats
 // the single embedded-select shape the audit measured at up to 11s).
@@ -171,13 +188,51 @@ interface SearchFetch {
 // expansion is built from the canonical key, so the cost bound (6 terms, 64
 // characters, one alias, two disjuncts) holds, and a query without an alias
 // (the common case) takes exactly the arguments it always did.
-function typedSearchArguments(key: string): { base: string; typed: string[]; folded: string } {
+// h206-search-1: with NO alias expansion, a query holding a root of the closed geminate list ('af', 'zam') adds the
+// doubled spellings of the whole query after the typed ones, the accusative ('benzin zam' -> 'benzin zammı') and the genitive
+// ('benzin zammın', whose stem is the bare doubled stem 'zamm'): `typed` is the de-duplicated
+// [...typedOnly, accusative, genitive, ...variants(accusative), ...variants(genitive)] cut to MAX_QUERY_VARIANTS, so the Turkish
+// spellings take priority over the ASCII ones (the dead 'zammi' slot, db-LOW-2), and `folded` stays foldTr(key), the typed
+// root, which is a word-start prefix of the doubled forms. The alias path keeps its precedence (an alias query never also gets
+// the doubled form: one alias, two disjuncts is the cost bound). `doubledOverflow` is the ACCUSATIVE query only (the genitive
+// does not get a call of its own) when the typed spellings already fill every slot and none of its spellings fits
+// ('ışık zam'), else null: fetchSearchClusters asks for it in a second call.
+function typedSearchArguments(key: string): {
+  base: string;
+  typed: string[];
+  folded: string;
+  doubledOverflow: string | null;
+} {
   const expansion = expandAliasQuery(key);
   const base = expansion ? expansion.variantsQuery : key;
+  const accusative = expansion ? null : searchDoubledQuery(base);
+  if (accusative === null) {
+    return {
+      base,
+      typed: turkishQueryVariants(base),
+      folded: foldTr(expansion ? expansion.foldedQuery : key),
+      doubledOverflow: null,
+    };
+  }
+  // No alias expansion on this path, so base === key and `folded` is the typed root.
+  const typedOnly = turkishQueryVariants(base);
+  const genitive = searchDoubledQuery(base, GEMINATE_DOUBLED_STEM_FORMS);
+  const candidates = [
+    ...typedOnly,
+    accusative,
+    ...(genitive === null ? [] : [genitive]),
+    ...turkishQueryVariants(accusative),
+    ...(genitive === null ? [] : turkishQueryVariants(genitive)),
+  ];
+  const merged: string[] = [];
+  for (const v of candidates) {
+    if (!merged.includes(v)) merged.push(v);
+  }
   return {
     base,
-    typed: turkishQueryVariants(base),
-    folded: foldTr(expansion ? expansion.foldedQuery : key),
+    typed: merged.slice(0, MAX_QUERY_VARIANTS),
+    folded: foldTr(key),
+    doubledOverflow: typedOnly.length >= MAX_QUERY_VARIANTS ? accusative : null,
   };
 }
 
@@ -199,6 +254,11 @@ function typedSearchArguments(key: string): { base: string; typed: string[]; fol
 // (replayed: 11 typed rows, 1 surviving the merge over pages 1-4), so 'reddi' stays typed-only, the old behaviour.
 // `searchSiblingQuery` is null for an operator, quoted, negated or alias query, which keep the typed arguments. Every page
 // 1 to 4 builds the same list from the same key, so a later page continues exactly page 1's.
+// h206-search-1: `typed` here already holds the doubled spellings of a typed root ('af' -> 'affı', 'affın'; 'benzin zam' ->
+// 'benzin zammı', 'benzin zammın'), so this order finds the 'öğrenci affı' stories too; `folded` stays the typed root, and
+// lit_d accepts the doubled forms because the typed root is a word-start prefix of them. A root with no sibling returns exactly
+// `typed` and `folded`; a query that has both (a root and a sibling term: 'imamoğluna zam') gets typed, doubled and the
+// sibling's spellings, cut to 6 as before.
 function siblingTermsArePrefixes(typedQuery: string, siblingQuery: string): boolean {
   const typedTerms = foldTr(typedQuery).split(/\s+/).filter((t) => t !== "");
   const siblingTerms = foldTr(siblingQuery).split(/\s+/).filter((t) => t !== "");
@@ -303,7 +363,7 @@ async function hydrateBundles(
 // as `searchClusters`' retry on a cache-attempt failure. `key` is already
 // canonical and length-checked by `searchClusters` before this is ever called.
 async function fetchSearchClusters(key: string): Promise<SearchFetch> {
-  const { base, typed, folded } = typedSearchArguments(key);
+  const { base, typed, folded, doubledOverflow } = typedSearchArguments(key);
   if (typed.length === 0) return { bundles: [], capped: false };
   // h96-search-1: 'elektrik zammı' and 'emlak vergisi' are stored under the stems of
   // 'zam' and 'vergi', so a query holding a possessive or a doubled-stem form also asks
@@ -329,7 +389,9 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
   // checked against them below (empty on the sibling path, which is never filtered).
   const foldedParts = sibling === null ? searchFoldedSiblingParts(base) : null;
   const locTerms = foldedParts?.terms ?? [];
-  const secondQuery = sibling ?? foldedParts?.query ?? null;
+  // h206-search-1: the doubled query ('ışık zam' -> 'ışık zammı') is the second call only when the typed spellings left it
+  // no slot AND neither the root sibling nor the folded locative wants the call (they keep their precedence).
+  const secondQuery = sibling ?? foldedParts?.query ?? doubledOverflow;
 
   const supabase = createReaderClient();
 
@@ -388,7 +450,8 @@ async function fetchSearchClusters(key: string): Promise<SearchFetch> {
       }
       seen.add(id);
       ids.push(id);
-      if (sibling === null) locIds.add(id);
+      // Only the locative call's rows are judged by the witness filter; the sibling's and the doubled query's never are.
+      if (foldedParts !== null) locIds.add(id);
     }
   }
   if (ids.length === 0) return { bundles: [], capped: false };

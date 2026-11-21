@@ -15,13 +15,15 @@ import { MAX_SEARCH_TERMS, canonicalSearchQuery } from "./turkish-query";
 // existing search_cluster_ids RPC already understands, so no migration is needed.
 
 describe("SEARCH_ALIAS_GROUPS", () => {
-  it("is exactly the AKP / AK Parti pair and two foreign-name spelling pairs, as tr-lowercased term sequences", () => {
+  it("is exactly the AKP / AK Parti pair and three foreign-name spelling pairs, as tr-lowercased term sequences", () => {
     // h116-search-2: Erakçi / Arakçi (Iran's foreign minister) and Zelenskiy / Zelenski.
-    // 'zelensky' stays out: two forms per group keep the documented bound of two disjuncts.
+    // h206-search-2: Kalibaf / Galibaf (Iran's parliament speaker).
+    // 'zelensky' and 'ghalibaf' stay out: two forms per group keep the documented bound of two disjuncts.
     expect(SEARCH_ALIAS_GROUPS).toEqual([
       [["akp"], ["ak", "parti"]],
       [["erakci"], ["arakci"]],
       [["zelenskiy"], ["zelenski"]],
+      [["kalibaf"], ["galibaf"]],
     ]);
   });
 
@@ -39,9 +41,10 @@ describe("SEARCH_ALIAS_GROUPS", () => {
     expect(new Set(forms).size).toBe(forms.length);
   });
 
-  it("never lists the English spelling 'zelensky' (a third form would make a third disjunct)", () => {
+  it("never lists the English spellings 'zelensky' and 'ghalibaf' (a third form would make a third disjunct)", () => {
     const terms = SEARCH_ALIAS_GROUPS.flatMap((g) => g.flat());
     expect(terms).not.toContain("zelensky");
+    expect(terms).not.toContain("ghalibaf");
   });
 });
 
@@ -598,5 +601,134 @@ describe("aliasTermForms: foreign-name spellings (h116-search-2)", () => {
     expect(aliasTermForms(["erakci", "afyon"])).toEqual([["erakci", "afyon"], ["arakci", "afyon"]]);
     expect(aliasTermForms(["afyon", "erakci"])).toEqual([["afyon", "erakci"], ["afyonkarahisar", "erakci"]]);
     expect(aliasTermForms(["hamenei", "akp"])).toEqual([["hamenei", "akp"], ["hamaney", "akp"]]);
+  });
+});
+
+// h206-search-2: Kalibaf and Galibaf (Iran's parliament speaker) are two archive searches with no shared
+// result. Live, 2026-11-21: /?q=kalibaf and /?q=galibaf each said 'en ilgili 24 sonuç' and shared 0 ids; over the
+// clusters first published in the last 60 days (word start on the folded title, neutral title and summary) kalibaf
+// 26 / galibaf 4 / both 1, so 'Galibaf' missed about 25 of 29 recent stories. ts_lexize leaves both whole. The
+// group is symmetric, in group order, with 'ghalibaf' left out as 'zelensky' is.
+describe("expandAliasQuery: Kalibaf / Galibaf (h206-search-2)", () => {
+  it("expands 'galibaf' into kalibaf or galibaf on both arms, in group order", () => {
+    expect(expandAliasQuery(canonicalSearchQuery("galibaf"))).toEqual({
+      variantsQuery: "kalibaf or galibaf",
+      foldedQuery: "kalibaf or galibaf",
+    });
+  });
+
+  it("gives 'Kalibaf' the same two disjuncts: the typed spelling does not move to the front", () => {
+    expect(expandAliasQuery(canonicalSearchQuery("Kalibaf"))).toEqual({
+      variantsQuery: "kalibaf or galibaf",
+      foldedQuery: "kalibaf or galibaf",
+    });
+  });
+
+  it("keeps the rest of the query in both disjuncts ('Kalibaf açıklaması')", () => {
+    expect(expandAliasQuery(canonicalSearchQuery("Kalibaf açıklaması"))).toEqual({
+      variantsQuery: "kalibaf açıklaması or galibaf açıklaması",
+      foldedQuery: "kalibaf açıklaması or galibaf açıklaması",
+    });
+    expect(expandAliasQuery("iran galibaf hürmüz")).toEqual({
+      variantsQuery: "iran kalibaf hürmüz or iran galibaf hürmüz",
+      foldedQuery: "iran kalibaf hürmüz or iran galibaf hürmüz",
+    });
+  });
+
+  it("an apostrophe suffix is cut by the canonical query, so \"Kalibaf'ın\" and \"Galibaf'ın\" expand like the bare name", () => {
+    const out = expandAliasQuery(canonicalSearchQuery("Kalibaf'ın"));
+    expect(out).toEqual({ variantsQuery: "kalibaf or galibaf", foldedQuery: "kalibaf or galibaf" });
+    expect(expandAliasQuery(canonicalSearchQuery("Galibaf'a"))).toEqual(out);
+  });
+
+  it("is Turkish-fold aware: KALİBAF, Kalıbaf (dotless) and the ASCII spelling expand alike", () => {
+    for (const q of ["KALİBAF", "Kalıbaf", "kalibaf", "KALIBAF", "GALİBAF", "Galıbaf", "GALIBAF"]) {
+      expect(expandAliasQuery(canonicalSearchQuery(q))?.foldedQuery, q).toBe("kalibaf or galibaf");
+    }
+  });
+
+  it.each([
+    ["kalibafın", "a suffixed word that is not cut (no apostrophe), as 'erakcinin' is not"],
+    ["galibafın", "a suffixed word that is not cut"],
+    ["kalibafli", "a different term"],
+    ["ghalibaf", "the English spelling is no member of the group"],
+    ["qalibaf", "another spelling is no member either"],
+    ["kalibaff", "a different term"],
+    ["kalibafa", "a different term"],
+    ["kalib", "a stem of the name is not the name"],
+    ["iran", "an ordinary query"],
+  ])("returns null for %j (%s)", (q) => {
+    expect(expandAliasQuery(q)).toBeNull();
+  });
+
+  it.each([
+    ['"kalibaf"', "a quoted phrase is an exact search"],
+    ["galibaf -iran", "a negated term"],
+    ["-galibaf", "a leading negation"],
+    ["kalibaf or galibaf", "a standalone or"],
+  ])("returns null for %j (%s): the reader already used websearch syntax", (q) => {
+    expect(expandAliasQuery(q)).toBeNull();
+  });
+
+  it("never quotes (both spellings are one word) and expands only the FIRST alias occurrence", () => {
+    for (const q of ["kalibaf", "galibaf", "kalibaf iran", "iran galibaf"]) {
+      const out = expandAliasQuery(q);
+      expect(out?.variantsQuery, q).not.toContain('"');
+      expect(out?.foldedQuery, q).not.toContain('"');
+    }
+    expect(expandAliasQuery("kalibaf zelenski")?.foldedQuery).toBe("kalibaf zelenski or galibaf zelenski");
+    expect(expandAliasQuery("zelenski kalibaf")?.foldedQuery).toBe("zelenskiy kalibaf or zelenski kalibaf");
+    expect(expandAliasQuery("erakci galibaf")?.foldedQuery).toBe("erakci galibaf or arakci galibaf");
+    expect(expandAliasQuery("galibaf hamenei")?.foldedQuery).toBe("kalibaf hamenei or galibaf hamenei");
+    expect(expandAliasQuery("kalibaf galibaf")?.foldedQuery).toBe("kalibaf galibaf or galibaf galibaf");
+    for (const q of ["kalibaf zelenski", "zelenski kalibaf", "galibaf hamenei", "kalibaf galibaf"]) {
+      expect(expandAliasQuery(q)?.foldedQuery.split(" or "), q).toHaveLength(2);
+      expect(expandAliasQuery(q)?.variantsQuery.split(" or "), q).toHaveLength(2);
+    }
+  });
+
+  it("is bounded: at most 2 disjuncts of 6 terms, 7 terms are refused", () => {
+    for (const alias of ["kalibaf", "galibaf"]) {
+      const canonical = canonicalSearchQuery(`${alias} a1 b2 c3 d4 e5 f6 g7`);
+      expect(canonical.split(" ")).toHaveLength(MAX_SEARCH_TERMS);
+      const out = expandAliasQuery(canonical);
+      const disjuncts = out?.foldedQuery.split(" or ") ?? [];
+      expect(disjuncts, alias).toHaveLength(2);
+      expect(Math.max(...disjuncts.map((d) => d.split(" ").length)), alias).toBe(MAX_SEARCH_TERMS);
+      expect(out?.variantsQuery.split(" or "), alias).toHaveLength(2);
+      expect(expandAliasQuery(`${alias} a1 b2 c3 d4 e5 f6`), alias).toBeNull();
+    }
+  });
+
+  it("leaves every earlier group and the one-way table exactly as they were", () => {
+    expect(expandAliasQuery("akp")).toEqual({
+      variantsQuery: 'akp or "ak parti"',
+      foldedQuery: "akp or ak parti",
+    });
+    expect(expandAliasQuery("erakci")?.foldedQuery).toBe("erakci or arakci");
+    expect(expandAliasQuery("zelenski")?.foldedQuery).toBe("zelenskiy or zelenski");
+    expect(expandAliasQuery("hamenei")?.foldedQuery).toBe("hamenei or hamaney");
+    expect(expandAliasQuery("afyon")?.foldedQuery).toBe("afyon or afyonkarahisar");
+  });
+});
+
+describe("aliasTermForms: Kalibaf / Galibaf (h206-search-2)", () => {
+  it("returns both spellings in group order, whichever the reader typed", () => {
+    expect(aliasTermForms(["galibaf"])).toEqual([["kalibaf"], ["galibaf"]]);
+    expect(aliasTermForms(["kalibaf"])).toEqual([["kalibaf"], ["galibaf"]]);
+  });
+
+  it("matches through the fold and keeps the other terms", () => {
+    expect(aliasTermForms(["Galibaf"])).toEqual([["kalibaf"], ["galibaf"]]);
+    expect(aliasTermForms(["iran", "KALİBAF", "hürmüz"])).toEqual([
+      ["iran", "kalibaf", "hürmüz"],
+      ["iran", "galibaf", "hürmüz"],
+    ]);
+  });
+
+  it("returns null for a different term or the English spelling", () => {
+    expect(aliasTermForms(["kalibafın"])).toBeNull();
+    expect(aliasTermForms(["ghalibaf"])).toBeNull();
+    expect(aliasTermForms(["kalib"])).toBeNull();
   });
 });

@@ -175,10 +175,27 @@ rebuilds all 11 published pairs from their real headline and member titles.
 **This does not repair rows already live.** The cron only re-scores fact-checks
 from the last `RECENT_WINDOW_DAYS = 3` days and only ever promotes shadow rows,
 never demotes an auto-published one, so the four keyword-v1 links above stay
-on the site until an operator unpublishes them with the SQL under *Ops notes*.
+in the table until an operator unpublishes them with the SQL under *Ops notes*.
 Rows written after this change carry `method = 'keyword-v2'`; audit the old
 ones with `select * from cluster_fact_checks where method = 'keyword-v1' and
 is_published;`.
+
+**The reader now hides them anyway (h206-story-1).** `readClusterFactChecks`
+(`src/lib/fact-checks/cluster-fact-checks-query.ts`) applies the v2 name-span
+gate to `method = 'keyword-v1'`, `decided_by = 'auto'` rows at read time:
+`legacyLinkPassesV2(fact_checks.title, matched_terms)` in `match.ts` re-derives
+the title's name spans and requires `distinctEvidenceCount(...) >=
+MIN_MATCHED_TERMS` over the stored `matched_terms` (the same function
+`scoreCluster` uses for `distinctTerms`). A row that fails is skipped, so the
+four wrong links above no longer render "Bu konuda doğrulama" once the
+cluster-feed cache expires; the 7 on-topic keyword-v1 links still do.
+`decided_by = 'admin'` rows and `keyword-v2` rows are never filtered, and the
+reader now reads up to 6 rows and shows at most 3 after filtering, so dropped
+legacy rows cannot starve the box. Nothing is written: `cluster_fact_checks`
+still holds the same 11 published rows. The operator unpublish SQL under *Ops
+notes* stays valid and is now optional cleanup (it records the decision in the
+table, and `decided_by = 'admin'` keeps the cron from touching the row).
+`FACT_CHECK_BOX=off` is unchanged.
 
 ## Candidate retrieval is relevance-ranked from 2026-11 (migration 181)
 
