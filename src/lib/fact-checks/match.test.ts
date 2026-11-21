@@ -6,6 +6,8 @@ import {
   buildFtsQuery,
   scoreCluster,
   rankMatches,
+  distinctEvidenceCount,
+  legacyLinkPassesV2,
   MATCH_METHOD,
   GENERIC_CLAIM_VERB_STEMS,
   MIN_MATCHED_TERMS,
@@ -677,6 +679,114 @@ describe("replay of the audited published rows (keyword-v2)", () => {
     const ranked = rankMatches(t, docs);
     expect(ranked).toHaveLength(3);
     expect(ranked.every((r) => r.decision === "shadow")).toBe(true);
+  });
+});
+
+/**
+ * h206-story-1: the reader re-applies the v2 name-span rule to legacy keyword-v1 auto links at read
+ * time (the cron never demotes a published row). `legacyLinkPassesV2` takes the fact-check title and
+ * the STORED matched_terms, so it needs no cluster text, and `distinctEvidenceCount` is the very loop
+ * `scoreCluster` uses for `distinctTerms`, extracted so the two cannot drift apart.
+ */
+describe("legacyLinkPassesV2 (h206-story-1)", () => {
+  it.each(WRONG_PUBLISHED_PAIRS)(
+    "wrong keyword-v1 pair $id is rejected from its fact-check title and stored matched_terms",
+    (pair) => {
+      expect(legacyLinkPassesV2(pair.factCheckTitle, pair.storedMatched)).toBe(false);
+    },
+  );
+
+  it.each(RIGHT_PUBLISHED_PAIRS)(
+    "on-topic keyword-v1 pair $id still passes",
+    (pair) => {
+      expect(legacyLinkPassesV2(pair.factCheckTitle, pair.storedMatched)).toBe(true);
+    },
+  );
+
+  it("covers all 11 audited published rows: 4 rejected, 7 kept", () => {
+    const all = [...WRONG_PUBLISHED_PAIRS, ...RIGHT_PUBLISHED_PAIRS];
+    expect(all).toHaveLength(11);
+    const kept = all.filter((p) => legacyLinkPassesV2(p.factCheckTitle, p.storedMatched));
+    expect(kept.map((p) => p.id).sort()).toEqual(
+      RIGHT_PUBLISHED_PAIRS.map((p) => p.id).sort(),
+    );
+  });
+
+  it("an empty stored matched list never passes, and neither does an empty title", () => {
+    expect(legacyLinkPassesV2(FIDAN_TITLE, [])).toBe(false);
+    expect(legacyLinkPassesV2("", ["hakan", "fidan", "konus"])).toBe(false);
+  });
+
+  it("passes exactly at the MIN_MATCHED_TERMS boundary and not one distinct term below", () => {
+    // A sentence-case title with no name span: every stored stem outside
+    // GENERIC_CLAIM_VERB_STEMS is one distinct term.
+    const title = "Panama deprem büyüklüğü tsunami uyarısı";
+    const terms = extractFactCheckTerms(title);
+    expect(terms.nameSpans).toEqual([]);
+    expect(legacyLinkPassesV2(title, ["panam", "depre", "buyuk"])).toBe(true);
+    expect(legacyLinkPassesV2(title, ["panam", "depre"])).toBe(false);
+    // A generic claim verb adds nothing toward the minimum.
+    expect(legacyLinkPassesV2(title, ["panam", "depre", "konus"])).toBe(false);
+  });
+
+  it("agrees with the scoreCluster publish gate on the audited fixtures", () => {
+    for (const pair of [...WRONG_PUBLISHED_PAIRS, ...RIGHT_PUBLISHED_PAIRS]) {
+      const r = scoreCluster(
+        extractFactCheckTerms(pair.factCheckTitle),
+        doc(pair.id, pair.headline, pair.memberTitles),
+      );
+      expect(legacyLinkPassesV2(pair.factCheckTitle, pair.storedMatched)).toBe(
+        r.distinctTerms >= MIN_MATCHED_TERMS,
+      );
+    }
+  });
+});
+
+describe("distinctEvidenceCount (h206-story-1)", () => {
+  it("scoreCluster.distinctTerms equals distinctEvidenceCount on both fixture sets", () => {
+    for (const pair of [...WRONG_PUBLISHED_PAIRS, ...RIGHT_PUBLISHED_PAIRS]) {
+      const t = extractFactCheckTerms(pair.factCheckTitle);
+      const r = scoreCluster(t, doc(pair.id, pair.headline, pair.memberTitles));
+      expect(distinctEvidenceCount(t.nameSpans, r.matched)).toBe(r.distinctTerms);
+    }
+  });
+
+  it("scoreCluster.distinctTerms equals distinctEvidenceCount on the other pinned pairs", () => {
+    for (const pair of MISSED_BY_SIZE_ORDER_PAIRS) {
+      const t = extractFactCheckTerms(pair.factCheckTitle);
+      const r = scoreCluster(t, doc(pair.id, pair.headline, pair.memberTitles));
+      expect(distinctEvidenceCount(t.nameSpans, r.matched)).toBe(r.distinctTerms);
+      expect(r.distinctTerms).toBe(pair.distinctTerms);
+    }
+  });
+
+  it("counts a name span once, ignores generic claim verbs, counts other stems one each", () => {
+    expect(distinctEvidenceCount([["hakan", "fidan"]], ["hakan", "fidan", "konus"])).toBe(1);
+    expect(distinctEvidenceCount([["hakan", "fidan"]], ["hakan", "fidan", "konus", "almanc"])).toBe(2);
+    expect(distinctEvidenceCount([], ["panam", "depre", "buyuk"])).toBe(3);
+  });
+
+  it("overlapping spans of one person count once; a span with no matched stem counts zero", () => {
+    expect(
+      distinctEvidenceCount(
+        [
+          ["hakan", "fidan"],
+          ["hakan", "fidan"],
+        ],
+        ["hakan", "fidan"],
+      ),
+    ).toBe(1);
+    expect(distinctEvidenceCount([["hakan", "fidan"]], ["konus"])).toBe(0);
+    expect(distinctEvidenceCount([["hakan", "fidan"]], [])).toBe(0);
+  });
+
+  it("is pure: empty inputs give 0 and neither argument is mutated", () => {
+    expect(distinctEvidenceCount([], [])).toBe(0);
+    const spans: string[][] = [["alpha", "beta"]];
+    const matched = ["alpha", "beta", "konus"];
+    distinctEvidenceCount(spans, matched);
+    expect(spans).toEqual([["alpha", "beta"]]);
+    expect(matched).toEqual(["alpha", "beta", "konus"]);
   });
 });
 

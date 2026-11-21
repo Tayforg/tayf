@@ -59,10 +59,12 @@ import {
   MIN_QUERY_LENGTH,
   archivePagePhrase,
   displayQuery,
+  isStopWordOnlyQuery,
   isTooShortQuery,
   resultCountPhrase,
   searchStatusText,
   searchTitle,
+  stopWordOnlyStatus,
 } from "@/lib/search/search-status";
 import {
   ARCHIVE_MAX_PAGE,
@@ -97,12 +99,15 @@ function firstQuery(raw: string | string[] | undefined): string | undefined {
 }
 
 // h170-roadmap-1: ?arsiv=N pages the archive ranking, and only for a query the archive actually
-// searches. "Searches" is HomeFeed's `searchable` below (typed, and not too short once canonical),
-// written once more here for generateMetadata so the title can never name a page the body does not
-// show: a too-short q with ?arsiv=3 is page 1 in both. Without a q the parameter is ignored.
+// searches. "Searches" is HomeFeed's `searchable` below (typed, not too short once canonical, and not
+// made of engine stop words only, h206-search-3), written once more here for generateMetadata so the
+// title can never name a page the body does not show: a too-short or stop-word q with ?arsiv=3 is
+// page 1 in both. Without a q the parameter is ignored.
 function searchArchivePage(q: string, raw: string | string[] | undefined): number {
   const typed = displayQuery(q) !== "";
-  const tooShort = isTooShortQuery(q) || (typed && canonicalSearchQuery(q).length < MIN_QUERY_LENGTH);
+  const tooShort =
+    isTooShortQuery(q) ||
+    (typed && (canonicalSearchQuery(q).length < MIN_QUERY_LENGTH || isStopWordOnlyQuery(q)));
   return typed && !tooShort ? parseArchivePage(raw) : 1;
 }
 
@@ -329,10 +334,23 @@ export async function HomeFeed({
   // laxer, but both are checked so the two can't disagree. The raw q is still
   // what searchClusters receives and what the echo shows; only the decision is
   // canonical.
+  // h206-search-3: a query whose every term is an engine stop word ('ve', 'bu',
+  // 'daha', 'için') is not searched either. The turkish config drops most of them
+  // ('ve', 'bu', 'daha' find nothing), but 14 hold ç/ğ/ı/ş/ü and their ASCII fold,
+  // which the archive's folded arm also searches, is an ordinary lexeme (prod
+  // 2026-11-21: 24 capped rows of noise for için, şu, nasıl). The in-feed title
+  // filter would also claim "“ve” için 3 sonuç bulundu" while hundreds of
+  // headlines hold the word. It sets `tooShort` (so `searchable`
+  // is false: no archive call, no in-feed filter, ?arsiv= and ?sirala= ignored, a
+  // noindex title), and `stopWordOnly` tells the copy apart: the length floor wins
+  // ('o' is a stop word, but one character), a stop-word query asks for a more
+  // distinctive word instead.
   const typed = q !== undefined && displayQuery(q) !== "";
-  const tooShort =
+  const belowFloor =
     isTooShortQuery(q) ||
     (typed && canonicalSearchQuery(q).length < MIN_QUERY_LENGTH);
+  const stopWordOnly = typed && !belowFloor && isStopWordOnlyQuery(q);
+  const tooShort = belowFloor || stopWordOnly;
   const searchable = typed && !tooShort;
   // h170-roadmap-1: the archive page (?arsiv=N, 1 to ARCHIVE_MAX_PAGE) of a query that is searched; without
   // one the parameter is ignored. A page after the first shows that page's archive rows ONLY: the in-feed
@@ -365,8 +383,11 @@ export async function HomeFeed({
         : null;
   // searchStatusText only knows the normalised floor, so a punctuation-only
   // query would be announced as "no results" while the page says "type more":
-  // the canonical decision wins in the live region too.
-  const tooShortStatus = `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
+  // the canonical decision wins in the live region too. A stop-word-only query
+  // gets the sentence the empty card shows (stopWordOnlyStatus, h206-search-3).
+  const tooShortStatus = stopWordOnly
+    ? stopWordOnlyStatus(q)
+    : `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
 
   // h170-roadmap-3 (react-2): the rising rail's read starts HERE, beside the feed read, not when the
   // rail renders after the feed. It is never awaited by HomeFeed (only RisingRail awaits it, inside
@@ -449,9 +470,13 @@ export async function HomeFeed({
   // spelling as a second token list, as the archive does (h42-search-1): a card
   // matches when ANY list matches.
   const alternatives = q ? searchTokenAlternatives(canonicalSearchQuery(q)) : null;
+  // h206-search-3: a stop-word-only query matches no card. Its token ('ve') is two characters, so the title filter
+  // would otherwise list the few cards that hold the word, under a status that says the query cannot be searched.
+  // (A too-short query yields no token at all, so it already matches nothing.)
   const matchesQuery = (b: ClusterBundle) =>
-    alternatives === null ||
-    alternatives.some((tokens) => titleMatchesTokens(b.cluster.title_tr, tokens));
+    !stopWordOnly &&
+    (alternatives === null ||
+      alternatives.some((tokens) => titleMatchesTokens(b.cluster.title_tr, tokens)));
 
   // Dedupe: a cluster that's both "breaking" (< 2h) AND in the top-30
   // ranked set would otherwise render twice. The Son Dakika strip wins
@@ -796,7 +821,13 @@ export async function HomeFeed({
             ))}
 
           {view.emptySearch && (
-            <EmptySearch query={echoQ} tooShort={tooShort} sort={sort} newestShown={shownSort !== null} />
+            <EmptySearch
+              query={echoQ}
+              tooShort={tooShort}
+              stopWordOnly={stopWordOnly}
+              sort={sort}
+              newestShown={shownSort !== null}
+            />
           )}
         </>
       )}
@@ -894,12 +925,18 @@ function FeedUnavailable() {
 function EmptySearch({
   query,
   tooShort = false,
+  stopWordOnly = false,
   sort = null,
   newestShown = false,
 }: {
   query?: string;
-  /** The query is below MIN_QUERY_LENGTH: no search ran, so nothing "was not found". */
+  /** The query was not searched (below MIN_QUERY_LENGTH, or engine stop words only): nothing "was not found". */
   tooShort?: boolean;
+  /**
+   * h206-search-3: the reason it was not searched is that every term is an engine stop word ('ve', 'bu'), not its
+   * length. Same card, same markup; the second line is the stopWordOnlyStatus sentence the live region announces.
+   */
+  stopWordOnly?: boolean;
   /** The order the search was asked for (h191): the word chips keep ?sirala=yeni. */
   sort?: SearchSort | null;
   /**
@@ -928,8 +965,8 @@ function EmptySearch({
             : "Hiç haber bulunamadı"}
       </p>
       {tooShort ? (
-        <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed">
-          {`En az ${MIN_QUERY_LENGTH} karakter yazın.`}
+        <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed break-words [overflow-wrap:anywhere]">
+          {stopWordOnly ? stopWordOnlyStatus(query) : `En az ${MIN_QUERY_LENGTH} karakter yazın.`}
         </p>
       ) : echoed && newestShown ? (
         <>

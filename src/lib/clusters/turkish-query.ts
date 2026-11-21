@@ -553,6 +553,32 @@ export function searchedWordsAsTyped(q: string): string {
 //       one of ı i u ü -> the root. zammı -> zam, hakkı -> hak, affı -> af.
 //       The allowlist is closed on purpose: a general doubled-consonant rule turns
 //       'messi' into 'mes'. Add a root only after checking it against the live archive.
+//   (B') the reverse of B (h206-search-1, `searchDoubledQuery`): a typed ROOT of the closed list
+//       {af, zam} also searches its vowel-suffixed doubled form AND its genitive: af -> affı + affın,
+//       zam -> zammı + zammın. The stemmer stores 'affı' and 'zammı' whole (ts_lexize('turkish_stem'),
+//       2026-11-21: affı -> {affı}, zammı -> {zammı}, while af -> {af}, zam -> {zam}) and cuts the genitive and
+//       the n-forms to the bare doubled stem (affın, affına, affını, affımız -> {aff}; zammın, zammına -> {zamm}),
+//       so a root never met any of them, and rule B only ever mapped the doubled form DOWN to the root. 'aff'
+//       collides with no other word (affa -> {affa}, affet -> {affet}). Live, 2026-11-21, among the clusters that
+//       are not archived and hold 2 or more articles: 54 match the lexeme 'af' and 40 more hold only affı/aff/affın
+//       ('öğrenci affı': /?q=af and /?q=affı each listed 24 (capped) and shared ONE id); 'zam' matches 153 and 16
+//       more hold only zammı/zamm ('benzin zam' said 4 sonuç, 'benzin zammı' 5, the extra one 7fd2b00d; 'motorin
+//       zam' ed2ad35d and 'kira zam' b2f1cb37 were missing the same way). The two doubled spellings join the TYPED
+//       call's variants (search-query.ts typedSearchArguments), so page 1, pages 2 to 4 and the newest-first order
+//       all send them; `p_folded` stays the typed root, a word-start prefix of the doubled forms, so the 166 guard,
+//       the 172 / 194 tiers and migration 216's literal-title filter keep reading the words the reader typed.
+//       The third slot is the GENITIVE, not an ASCII spelling (replay 2026-11-21): the ASCII lexemes 'affi', 'zammi'
+//       and 'sirri' are in 0 such clusters, so the slot reached nothing, while 16 clusters hold 'aff' and none of
+//       af/affı/affi, and 5 hold 'zamm' and none of zam/zammı/zammi. In the first 100 ranked rows 'affi' reached 0
+//       of those 16 and 'affın' all 16 (zamm-only: 'zammın' 3 of 5). Turkish spellings take priority over ASCII ones.
+//       The list is closed, like B's, and SMALLER: 'hak' stays out (the stored 'hakk' is mostly 'hakkında'),
+//       'ret' stays out ('redd' does not start with 'ret', so the word-start filter on the typed root would
+//       drop those rows; the 'reddi' notes of h196 say the same), and 'his' and 'hat' stay out (the bare
+//       doubled stems 'hiss' and 'hatt' collide with 'hisse' and 'hatta'). 'sır' stays out: 'sırrı' is also the
+//       given name Sırrı, the same lexeme (ts_lexize: sırrı -> {sırrı}), so no filter can tell the word from the
+//       name; replay 2026-11-21: /?q=sır with 'sırrı' gained 26 rows in the 96-row window, 18 about Sırrı Sakık /
+//       Sırrı Süreyya Önder / Mehmet Sırrı Şık, 3 of them on page 1. Add a root only after a ts_lexize check of
+//       the forms plus a live replay of the two searches.
 //
 // Two more rules, added with their live counts (h144-search-1, production, 2026-11-12,
 // ts_lexize('turkish_stem') and search_cluster_ids(array[q], tayf_search_fold(q), 50)).
@@ -630,6 +656,30 @@ export const GEMINATE_ROOTS: ReadonlyMap<string, string> = new Map([
 const GEMINATE_BY_FOLD: ReadonlyMap<string, string> = new Map(
   [...GEMINATE_ROOTS].map(([doubled, root]) => [foldTr(doubled), root]),
 );
+
+/**
+ * Rule B' (h206-search-1): the roots of `GEMINATE_ROOTS` whose vowel-suffixed doubled form is also
+ * searched when the root is typed. Key: the FOLDED root. Value: the doubled form the stemmer leaves
+ * whole, with Turkish letters. Closed on purpose, and smaller than `GEMINATE_ROOTS`: hak, ret, his, hat
+ * and sır stay out ('sırrı' is also the given name Sırrı, the same lexeme; see the header). Add a root
+ * only after a ts_lexize check plus a live replay, in the style of the comment above.
+ */
+export const GEMINATE_DOUBLED_FORMS: ReadonlyMap<string, string> = new Map([
+  ["af", "affı"],
+  ["zam", "zammı"],
+]);
+
+/**
+ * Rule B' (h206-search-1, db-LOW-2): the same keys as `GEMINATE_DOUBLED_FORMS`, with the GENITIVE of the
+ * doubled stem as the value. Its `turkish_stem` is the bare doubled stem ('aff', 'zamm'), which also covers
+ * affına, affını, affımız and zammına, so it reaches the clusters that hold only the n-forms; the ASCII
+ * spelling of the vowel-suffixed form ('affi', 'zammi') is in no live cluster and used to take this slot for
+ * nothing. Pass it as the second argument of `searchDoubledQuery`.
+ */
+export const GEMINATE_DOUBLED_STEM_FORMS: ReadonlyMap<string, string> = new Map([
+  ["af", "affın"],
+  ["zam", "zammın"],
+]);
 
 // Terms that fit rule A's or rule C's shape and are not an inflection of their 'root': 'kayısı' is
 // the fruit, 'kayı' is something else; 'kanada' is Canada, not kana + da. Compared folded, so 'kayısı'
@@ -800,6 +850,39 @@ export function searchSiblingQuery(q: string): string | null {
       if (root === null) return t;
       changed = true;
       return root;
+    });
+  return changed ? terms.join(" ") : null;
+}
+
+/**
+ * The same query with every WHOLE term that is a root of `forms` (default `GEMINATE_DOUBLED_FORMS`;
+ * compared tr-lower-cased and ASCII-folded, so 'AF' and 'Af' qualify) replaced by its doubled form
+ * ('benzin zam' -> 'benzin zammı', 'af' -> 'affı'); the other terms are kept as typed (rule B',
+ * h206-search-1). With `GEMINATE_DOUBLED_STEM_FORMS` the replacement is the genitive instead
+ * ('benzin zam' -> 'benzin zammın', 'af' -> 'affın'). 'sır' is not a key of either map: 'sırrı' is also
+ * the given name Sırrı, so 'sır' gives null. Null when the query uses websearch syntax
+ * (`hasSearchOperator`: the reader is in charge) or when no term changes, so applying it to its own
+ * output gives null ('zammı' is not a key). The term count never changes, so the 6-term bound of
+ * the canonical query holds; each changed term grows by two letters, like a locative. A term longer
+ * than MAX_SEARCH_QUERY_LENGTH is not a word and is never examined. search-query.ts adds the results
+ * to the typed call's variants; it only sends the accusative query as a call of its own when the typed
+ * spellings fill every slot.
+ */
+export function searchDoubledQuery(
+  q: string,
+  forms: ReadonlyMap<string, string> = GEMINATE_DOUBLED_FORMS,
+): string | null {
+  if (hasSearchOperator(q)) return null;
+  let changed = false;
+  const terms = q
+    .split(/\s+/)
+    .filter((t) => t !== "")
+    .map((t) => {
+      if (t.length > MAX_SEARCH_QUERY_LENGTH) return t;
+      const doubled = forms.get(foldTr(t.toLocaleLowerCase("tr")));
+      if (doubled === undefined) return t;
+      changed = true;
+      return doubled;
     });
   return changed ? terms.join(" ") : null;
 }

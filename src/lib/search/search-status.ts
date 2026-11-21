@@ -1,5 +1,6 @@
-import { normaliseSearchQuery } from "@/lib/clusters/turkish-query";
+import { canonicalSearchQuery, normaliseSearchQuery } from "@/lib/clusters/turkish-query";
 import { formatCountTr } from "@/lib/format/number-tr";
+import { ENGINE_STOP_WORDS } from "@/lib/search/relaxed-search";
 import { SEARCH_SORT_NEW, type SearchSort } from "@/lib/search/search-sort";
 
 // Reader-facing sentences for the home search (h10-a11y-2): the text of the
@@ -32,6 +33,33 @@ export const MIN_QUERY_LENGTH = 2;
 export function isTooShortQuery(q: string | undefined): boolean {
   const raw = (q ?? "").trim();
   return raw !== "" && normaliseSearchQuery(raw).length < MIN_QUERY_LENGTH;
+}
+
+/**
+ * h206-search-3: true when the query has at least one term and EVERY term is one of the words the search engine
+ * throws away (ENGINE_STOP_WORDS: 've', 'bu', 'daha', 'için'). The turkish config drops these words in their Turkish
+ * spelling, so most of them ('ve', 'bu', 'daha') find nothing in the archive; 14 hold ç/ğ/ı/ş/ü, and their ASCII fold,
+ * which the archive's folded arm also searches (p_folded), is an ordinary lexeme (için -> 'iç', şu -> 'su', tüm ->
+ * 'tum', nasıl -> 'nasil', ...). Prod 2026-11-21 returned 24 (capped) rows of noise for için, şu and nasıl, so these
+ * queries are blocked on purpose, and the check removes those archive rows. The in-feed title filter would also answer
+ * with the few cards that happen to hold the word ('“ve” için 3 sonuç bulundu' while hundreds of live headlines
+ * contain 've'). Callers treat it like a too-short query: no search runs and the reader is asked for a more
+ * distinctive word.
+ *
+ * The terms are the canonical ones (canonicalSearchQuery: the exact words the archive searches, Turkish
+ * lower-cased, edge punctuation and an apostrophe suffix cut, at most the first six), with the quotes of a phrase
+ * stripped, and compared as relaxedSearchWords compares them: NOT ASCII-folded, per the contract of
+ * ENGINE_STOP_WORDS ('icin' and 'nasil' are real lexemes and stay searchable). A negated term ('-ve') is not a
+ * stop word, so 've -erdoğan' is searched as before. Pure and linear in the query.
+ */
+export function isStopWordOnlyQuery(q: string): boolean {
+  const terms = canonicalSearchQuery(q).split('"').join("").split(" ").filter((term) => term !== "");
+  return terms.length > 0 && terms.every((term) => ENGINE_STOP_WORDS.has(term));
+}
+
+/** The sentence for a stop-word-only query (the live region, and the empty card on "/"): `“ve” tek başına aranamıyor: ...`. */
+export function stopWordOnlyStatus(q: string | undefined): string {
+  return `“${displayQuery(q)}” tek başına aranamıyor: daha belirgin bir kelime yazın.`;
 }
 
 /**
@@ -106,6 +134,8 @@ export interface SearchStatusArgs {
  * blank q has nothing to announce, and an empty live region says nothing).
  * A too-short query asks for more characters: no search ran, so neither
  * "no results" nor "not responding" would be true, and it wins over both.
+ * A query of engine stop words only asks for a more distinctive word, for the
+ * same reason and with the same precedence (h206-search-3).
  * `unavailable` wins over `capped`: a failed archive search is never "capped".
  */
 export function searchStatusText({
@@ -120,6 +150,8 @@ export function searchStatusText({
   const shown = displayQuery(q);
   if (!shown) return "";
   if (isTooShortQuery(q)) return `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
+  // h206-search-3: a query of engine stop words only is not searched either, so no count and no "not found".
+  if (isStopWordOnlyQuery(q ?? "")) return stopWordOnlyStatus(q);
 
   // h170-roadmap-1: a later page of the ranking names its page. Its count is the page's, never the search's,
   // so it is not claimed; a page that cannot be shown says so, and any other failure is the plain one.

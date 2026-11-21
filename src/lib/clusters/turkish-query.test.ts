@@ -8,6 +8,8 @@ import {
   MAX_SEARCH_TERMS,
   SEARCH_FOLD_FROM,
   SEARCH_FOLD_TO,
+  GEMINATE_DOUBLED_FORMS,
+  GEMINATE_DOUBLED_STEM_FORMS,
   GEMINATE_ROOTS,
   canonicalSearchQuery,
   cleanQueryUnicode,
@@ -22,6 +24,7 @@ import {
   searchFoldedSiblingParts,
   searchQueryCut,
   searchQueryCutsWord,
+  searchDoubledQuery,
   searchQueryWasShortened,
   searchSiblingQuery,
   searchedWordsAsTyped,
@@ -1271,6 +1274,204 @@ describe("searchSiblingQuery (h96-search-1)", () => {
         expect(searchSiblingQuery(q.longTerm)).toBeNull();
         expect(searchSiblingQuery(q.manyTerms)).not.toBeNull();
         expect(searchSiblingQuery(q.dotless)).toBeNull();
+      },
+      { n: 200_000, ceilingMs: 8_000 },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h206-search-1: rule B', the reverse of rule B. A typed ROOT of the closed geminate list also
+// searches its vowel-suffixed doubled form ('af' -> 'affı', 'zam' -> 'zammı') and its genitive ('affın', 'zammın'),
+// because the stemmer stores 'affı' and 'zammı' whole and cuts the genitive to the bare doubled stem, so the root never
+// meets them. 'sır' is NOT in the list (db-LOW-1): 'sırrı' is also the given name Sırrı, the same lexeme.
+// ---------------------------------------------------------------------------
+
+describe("searchDoubledQuery (h206-search-1, rule B')", () => {
+  it("GEMINATE_DOUBLED_FORMS is exactly af and zam (folded keys) and nothing else: 'sır' stays out (db-LOW-1)", () => {
+    expect([...GEMINATE_DOUBLED_FORMS.entries()].sort()).toEqual(
+      [
+        ["af", "affı"],
+        ["zam", "zammı"],
+      ].sort(),
+    );
+    expect(GEMINATE_DOUBLED_FORMS.has("sir")).toBe(false);
+    expect(GEMINATE_DOUBLED_FORMS.has("sır")).toBe(false);
+  });
+
+  it("GEMINATE_DOUBLED_STEM_FORMS is exactly af -> affın and zam -> zammın, over the same keys (db-LOW-2)", () => {
+    expect([...GEMINATE_DOUBLED_STEM_FORMS.entries()].sort()).toEqual(
+      [
+        ["af", "affın"],
+        ["zam", "zammın"],
+      ].sort(),
+    );
+    expect([...GEMINATE_DOUBLED_STEM_FORMS.keys()].sort()).toEqual([...GEMINATE_DOUBLED_FORMS.keys()].sort());
+  });
+
+  it("every stem form is the genitive of the doubled stem: GEMINATE_ROOTS' doubled key plus 'ın' (its stem is the bare doubled stem)", () => {
+    for (const [key, genitive] of GEMINATE_DOUBLED_STEM_FORMS) {
+      const doubledStem = [...GEMINATE_ROOTS.entries()].find(([, root]) => foldTr(root) === key)?.[0];
+      expect(doubledStem, key).toBeDefined();
+      expect(genitive, key).toBe(`${doubledStem}ın`);
+    }
+  });
+
+  it("every entry is the reverse of a GEMINATE_ROOTS entry: the doubled form's rule B sibling is the key's root", () => {
+    for (const [key, doubled] of GEMINATE_DOUBLED_FORMS) {
+      expect(foldTr(searchSiblingQuery(doubled) as string), key).toBe(key);
+      expect(searchDoubledQuery(searchSiblingQuery(doubled) as string), key).toBe(doubled);
+    }
+  });
+
+  it.each([
+    ["af", "affı"],
+    ["AF", "affı"],
+    ["Af", "affı"],
+    ["aF", "affı"],
+    ["zam", "zammı"],
+    ["ZAM", "zammı"],
+    ["Zam", "zammı"],
+    // 'sır' is not in the closed list: 'sırrı' is also the given name Sırrı (db-LOW-1).
+    ["sır", null],
+    ["sir", null],
+    ["SIR", null],
+    ["Sır", null],
+    ["benzin zam", "benzin zammı"],
+    ["kira zam", "kira zammı"],
+    ["motorin zam", "motorin zammı"],
+    ["öğrenci af", "öğrenci affı"],
+  ])("%j -> %j", (q, doubled) => {
+    expect(searchDoubledQuery(q)).toBe(doubled);
+  });
+
+  it("keeps the other terms as typed (case and letters), replacing only the whole root term", () => {
+    expect(searchDoubledQuery("Benzin ZAM")).toBe("Benzin zammı");
+    expect(searchDoubledQuery("ŞİŞLİ af")).toBe("ŞİŞLİ affı");
+    expect(searchDoubledQuery("af zam")).toBe("affı zammı");
+    expect(searchDoubledQuery("zam af sır")).toBe("zammı affı sır");
+    expect(searchDoubledQuery("af sır")).toBe("affı sır");
+    expect(searchDoubledQuery("Sır AF")).toBe("Sır affı");
+  });
+
+  it("never changes the term count", () => {
+    const six = "benzin motorin kira zam af sır";
+    expect(searchDoubledQuery(six)!.split(" ")).toHaveLength(six.split(" ").length);
+    expect(searchDoubledQuery(six)!.split(" ").length).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+  });
+
+  it.each(["hak", "ret", "his", "hat", "sır", "sir"])(
+    "%j is NOT in the closed list (its stored doubled stem is another word or fails the word-start filter)",
+    (q) => {
+      expect(searchDoubledQuery(q)).toBeNull();
+      expect(GEMINATE_DOUBLED_FORMS.has(q)).toBe(false);
+    },
+  );
+
+  it.each([
+    "zammı",
+    "zammi",
+    "affı",
+    "sırrı",
+    "kara",
+    "zamlar",
+    "zamanı",
+    "afyon",
+    "afrika",
+    "afişe",
+    "sırlar",
+    "sırada",
+    "aff",
+    "zamm",
+    "benzin zammı",
+    "erdoğan",
+    "",
+    "   ",
+  ])("returns null for a term that is not a bare listed root: %j", (q) => {
+    expect(searchDoubledQuery(q)).toBeNull();
+  });
+
+  it.each(['"af"', "-af", "af -zam", "benzin -zam", "af or zam", "AF OR zam", '"benzin zam"', "zam or kira"])(
+    "returns null for any query that uses websearch syntax: %j (the reader is in charge)",
+    (q) => {
+      expect(searchDoubledQuery(q)).toBeNull();
+    },
+  );
+
+  it("is idempotent: applying it to its own output gives null", () => {
+    for (const q of ["af", "zam", "benzin zam", "af zam sır"]) {
+      const once = searchDoubledQuery(q);
+      expect(once, q).not.toBeNull();
+      expect(searchDoubledQuery(once!), q).toBeNull();
+    }
+  });
+
+  it("is the reverse of rule B: the sibling of the doubled query is the typed query (folded)", () => {
+    for (const q of ["af", "zam", "benzin zam", "kira zam"]) {
+      const sibling = searchSiblingQuery(searchDoubledQuery(q) as string);
+      expect(foldTr(sibling as string), q).toBe(foldTr(q));
+    }
+  });
+
+  it("a possessive or case-suffixed term next to a root is read by rule B' for the root only", () => {
+    expect(searchDoubledQuery("emlak vergisi zam")).toBe("emlak vergisi zammı");
+    expect(searchDoubledQuery("imamoğluna af")).toBe("imamoğluna affı");
+    expect(searchDoubledQuery("zammı af")).toBe("zammı affı");
+  });
+
+  describe("with GEMINATE_DOUBLED_STEM_FORMS as the second argument (db-LOW-2)", () => {
+    it.each([
+      ["af", "affın"],
+      ["AF", "affın"],
+      ["zam", "zammın"],
+      ["Zam", "zammın"],
+      ["benzin zam", "benzin zammın"],
+      ["kira zam", "kira zammın"],
+      ["öğrenci af", "öğrenci affın"],
+      ["af zam", "affın zammın"],
+      ["Benzin ZAM", "Benzin zammın"],
+    ])("%j -> %j", (q, stem) => {
+      expect(searchDoubledQuery(q, GEMINATE_DOUBLED_STEM_FORMS)).toBe(stem);
+    });
+
+    it("gives the genitive for 'benzin zam' and 'af', and the accusative stays the default", () => {
+      expect(searchDoubledQuery("benzin zam", GEMINATE_DOUBLED_STEM_FORMS)).toBe("benzin zammın");
+      expect(searchDoubledQuery("af", GEMINATE_DOUBLED_STEM_FORMS)).toBe("affın");
+      expect(searchDoubledQuery("benzin zam")).toBe("benzin zammı");
+      expect(searchDoubledQuery("af", GEMINATE_DOUBLED_FORMS)).toBe("affı");
+    });
+
+    it.each(["sır", "hak", "zammın", "affın", "kara", "", "   ", '"af"', "af -zam", "af or zam"])(
+      "returns null for %j (not a bare listed root, or websearch syntax)",
+      (q) => {
+        expect(searchDoubledQuery(q, GEMINATE_DOUBLED_STEM_FORMS)).toBeNull();
+      },
+    );
+
+    it("is idempotent, and reads only the map it is given", () => {
+      expect(searchDoubledQuery("affın zammın", GEMINATE_DOUBLED_STEM_FORMS)).toBeNull();
+      expect(searchDoubledQuery("kara", new Map([["kara", "karaa"]]))).toBe("karaa");
+      expect(searchDoubledQuery("af", new Map())).toBeNull();
+    });
+
+    it("never changes the term count", () => {
+      const six = "benzin motorin kira zam af sır";
+      expect(searchDoubledQuery(six, GEMINATE_DOUBLED_STEM_FORMS)).toBe("benzin motorin kira zammın affın sır");
+      expect(searchDoubledQuery(six, GEMINATE_DOUBLED_STEM_FORMS)!.split(" ")).toHaveLength(six.split(" ").length);
+    });
+  });
+
+  it("scales linearly: a long run of root terms and a long single term (CPU-time ladder)", () => {
+    expectLinear(
+      (n) => ({
+        manyTerms: rep("af ", "", "zam")(n),
+        longTerm: rep("a", "", "f")(n),
+        noRoot: rep("kara ", "", "su")(n),
+      }),
+      (q) => {
+        expect(searchDoubledQuery(q.manyTerms)).not.toBeNull();
+        expect(searchDoubledQuery(q.longTerm)).toBeNull();
+        expect(searchDoubledQuery(q.noRoot)).toBeNull();
       },
       { n: 200_000, ceilingMs: 8_000 },
     );
