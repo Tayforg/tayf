@@ -100,6 +100,18 @@ describe("articleCountLabel", () => {
     expect(articleCountLabel(60, true)).toBe("son 60 haber");
     expect(articleCountLabel(0, false)).toBe("0 haber");
   });
+
+  // h207-ekonomi-2: NOBEL and FRMPL read 'son 0 haber' above the empty state, because the old truncation flag came from the
+  // raw RPC row count (60) while the relevance gate then dropped all of them.
+  it("is never 'son 0 haber': an empty list reads '0 haber' even when the fetch window was full", () => {
+    expect(articleCountLabel(0, true)).toBe("0 haber");
+    expect(articleCountLabel(0, true)).not.toContain("son");
+  });
+
+  it("keeps 'son <n> haber' for a truncated non-empty list, whatever n", () => {
+    expect(articleCountLabel(1, true)).toBe("son 1 haber");
+    expect(articleCountLabel(25, true)).toBe("son 25 haber");
+  });
 });
 
 describe("priceTickKurus (Borsa Istanbul pay piyasasi fiyat adimi, in kurus)", () => {

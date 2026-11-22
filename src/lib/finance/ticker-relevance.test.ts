@@ -10,6 +10,7 @@ import {
   fetchLegalNoticeIdsSince,
   fetchLowRelevanceSince,
   fetchRelevanceScores,
+  fetchRelevanceScoresWithStatus,
   filterFeedTickers,
   isHiddenMatch,
   isLegalNotice,
@@ -346,6 +347,86 @@ describe("fetchRelevanceScores", () => {
     const scores = await fetchRelevanceScores(supabase as never, []);
     expect(scores.size).toBe(0);
     expect(called).toBe(false);
+  });
+});
+
+// h207-ekonomi-2: the status variant tells the caller whether every chunk was read, so a failed read can keep
+// the old 'son 60 haber' wording (readTickerPage) while fetchRelevanceScores stays a plain Map for the rest.
+describe("fetchRelevanceScoresWithStatus", () => {
+  it("is complete after every chunk read cleanly, with the scores of all chunks", async () => {
+    const keys = Array.from({ length: 230 }, (_, i) => `a${i}:THYAO`);
+    const supabase = makeFakeSupabase((_table, state) => {
+      const inFilter = state.in.find(([c]) => c === "subject_id");
+      return { data: (inFilter?.[1] ?? []).map((k) => ({ subject_id: k, jev_prob: 0.42 })), error: null };
+    });
+
+    const out = await fetchRelevanceScoresWithStatus(supabase as never, keys);
+
+    expect(out.complete).toBe(true);
+    expect(out.scores.size).toBe(230);
+    expect(out.scores.get("a229:THYAO")).toBe(0.42);
+  });
+
+  it("is complete for an empty key list, without querying", async () => {
+    let called = false;
+    const supabase = makeFakeSupabase(() => {
+      called = true;
+      return { data: [], error: null };
+    });
+
+    const out = await fetchRelevanceScoresWithStatus(supabase as never, []);
+
+    expect(out.complete).toBe(true);
+    expect(out.scores.size).toBe(0);
+    expect(called).toBe(false);
+  });
+
+  it("is incomplete when a LATER chunk errors, keeps the earlier chunks' scores, and warns", async () => {
+    const keys = Array.from({ length: 150 }, (_, i) => `a${i}:THYAO`);
+    let callIndex = 0;
+    const supabase = makeFakeSupabase((_table, state) => {
+      callIndex++;
+      if (callIndex === 1) {
+        const inFilter = state.in.find(([c]) => c === "subject_id");
+        return { data: (inFilter?.[1] ?? []).map((k) => ({ subject_id: k, jev_prob: 0.1 })), error: null };
+      }
+      return { data: null, error: { message: "boom" } };
+    });
+
+    const warnSpy = vi_spyOnConsoleWarn();
+    try {
+      const out = await fetchRelevanceScoresWithStatus(supabase as never, keys);
+
+      expect(out.complete).toBe(false);
+      expect(out.scores.size).toBe(100);
+      expect(out.scores.get("a0:THYAO")).toBe(0.1);
+      expect(out.scores.has("a100:THYAO")).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("is incomplete when the FIRST chunk errors, with an empty map", async () => {
+    const supabase = makeFakeSupabase(() => ({ data: null, error: { message: "boom" } }));
+    const warnSpy = vi_spyOnConsoleWarn();
+    try {
+      const out = await fetchRelevanceScoresWithStatus(supabase as never, ["a1:THYAO"]);
+
+      expect(out.complete).toBe(false);
+      expect(out.scores.size).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("fetchRelevanceScores returns the same map the status variant returns", async () => {
+    const supabase = makeFakeSupabase(() => ({ data: [{ subject_id: "a1:THYAO", jev_prob: 0.5 }], error: null }));
+
+    const plain = await fetchRelevanceScores(supabase as never, ["a1:THYAO"]);
+    const withStatus = await fetchRelevanceScoresWithStatus(supabase as never, ["a1:THYAO"]);
+
+    expect(plain).toEqual(withStatus.scores);
   });
 });
 

@@ -13,6 +13,8 @@ import type { ReactNode } from "react";
 const mocks = vi.hoisted(() => ({
   getFeedStatusSummary: vi.fn(),
   getWeekArchiveClusters: vi.fn(),
+  /** h207-weekly-1: the closed week's silent voting sources (null = unknown). */
+  getWeekSilentVotingSources: vi.fn(async (_key: string): Promise<unknown> => null),
   /** Every (rows, health, nowMs) call the page made to summariseWeek. */
   summariseCalls: [] as unknown[][],
   /** Order of connection() and the week read, to pin the request-time contract. */
@@ -38,6 +40,7 @@ vi.mock("@/lib/weekly/week-archive", async (importOriginal) => {
   return {
     ...actual,
     getWeekArchiveClusters: mocks.getWeekArchiveClusters,
+    getWeekSilentVotingSources: mocks.getWeekSilentVotingSources,
   };
 });
 
@@ -343,6 +346,138 @@ describe("/hafta/[hafta] filter-coverage caveat", () => {
 
     mocks.getWeekArchiveClusters.mockResolvedValue({ rows: [], truncated: false });
     expect(await renderWeek("2026-W38")).toContain(CAVEAT);
+  });
+});
+
+// h207-weekly-1: a closed week names the voting sources that delivered nothing
+// that week although they delivered materially in the weeks around it, and says
+// the zone shares are not one-to-one comparable with those weeks (what /trends
+// says since h90-trends-2). The names come from migration 219's RPC through
+// getWeekSilentVotingSources; the sentence comes from week-copy. The week in
+// progress never asks (its feeds are being read right now), and while the RPC
+// does not exist yet the read is null and the page prints nothing extra.
+describe("/hafta/[hafta] silent voting sources", () => {
+  beforeAll(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  const SILENT = [
+    { zone: "iktidar", names: ["En Son Haber"] },
+    { zone: "muhalefet", names: ["Artı Gerçek", "Halk TV"] },
+  ];
+  const SILENT_TEXT =
+    "O hafta 3 spektrum kaynağı hiç veri vermedi (İktidar: En Son Haber; Muhalefet: Artı Gerçek, Halk TV). " +
+    "Bu kaynaklar yakın haftalarda düzenli haber veriyordu; bölge payları bu yüzden o haftalarla birebir karşılaştırılamaz.";
+  const NOTE =
+    "Kör noktalar o hafta işaretlenen haberlerdir; sonradan geri alınan işaretler listede yer almaz.";
+  const COVERAGE =
+    "O haftanın kör noktaları, sonradan eklenen doğrulama süzgeçlerinin hepsinden geçmedi; toplamlar sonraki haftalarla birebir karşılaştırılamaz.";
+  const TALLY =
+    "Toplam 46 kör nokta · İktidar ağırlıklı 37 · Muhalefet ağırlıklı 9. Her taraftan en büyükleri gösteriliyor.";
+
+  beforeEach(() => {
+    mocks.summariseCalls = [];
+    mocks.getFeedStatusSummary.mockReset();
+    mocks.getFeedStatusSummary.mockResolvedValue({ delivering: 71, total: 96 });
+    mocks.getWeekArchiveClusters.mockReset();
+    mocks.getWeekArchiveClusters.mockResolvedValue({
+      rows: [{ id: "cl-1" }],
+      truncated: false,
+    });
+    mocks.getWeekSilentVotingSources.mockReset();
+    mocks.getWeekSilentVotingSources.mockResolvedValue(SILENT);
+  });
+
+  it("derives the keys from the frozen clock (guards the fixture)", () => {
+    expect(weekKeyFromMs(NOW.getTime())).toBe("2026-W45");
+  });
+
+  it.each(["2026-W38", "2026-W43", "2026-W44"])(
+    "closed week %s prints the sentence and reads exactly that week",
+    async (key) => {
+      const text = await renderWeek(key);
+
+      expect(text).toContain(SILENT_TEXT);
+      expect(mocks.getWeekSilentVotingSources).toHaveBeenCalledTimes(1);
+      expect(mocks.getWeekSilentVotingSources).toHaveBeenCalledWith(key);
+    },
+  );
+
+  it("the week in progress never calls the RPC and prints no sentence", async () => {
+    const text = await renderWeek("2026-W45");
+
+    expect(mocks.getWeekSilentVotingSources).not.toHaveBeenCalled();
+    expect(text).not.toContain("hiç veri vermedi");
+    expect(text).not.toContain("spektrum kaynağı");
+  });
+
+  it.each([
+    ["null (read failed, or migration 219 not applied yet)", null],
+    ["an empty list (nobody was silent)", []],
+  ])("%s prints no sentence, no error, and the rest of the page is untouched", async (_name, value) => {
+    mocks.getWeekSilentVotingSources.mockResolvedValue(value);
+
+    const text = await renderWeek("2026-W44");
+
+    expect(text).not.toContain("hiç veri vermedi");
+    expect(text).not.toContain("spektrum kaynağı");
+    expect(text).not.toContain("hesaplanamıyor");
+    expect(text).toContain(NOTE);
+    expect(text).toContain(TALLY);
+  });
+
+  it("sits in its own paragraph directly under the filter-coverage caveat, before any section", async () => {
+    const text = await renderWeek("2026-W38");
+
+    const note = text.indexOf(NOTE);
+    const coverage = text.indexOf(COVERAGE);
+    const silent = text.indexOf(SILENT_TEXT);
+    const firstSection = text.indexOf("O hafta kim neyi öne çıkardı");
+    expect(note).toBeGreaterThanOrEqual(0);
+    expect(coverage).toBeGreaterThan(note);
+    expect(silent).toBeGreaterThan(coverage);
+    expect(firstSection).toBeGreaterThan(silent);
+    // Directly after the coverage caveat: nothing but the separator between them.
+    expect(text.slice(coverage + COVERAGE.length, silent).trim()).toBe("");
+  });
+
+  it("without a coverage caveat (W44 on) it follows the note directly", async () => {
+    const text = await renderWeek("2026-W44");
+
+    const note = text.indexOf(NOTE);
+    const silent = text.indexOf(SILENT_TEXT);
+    expect(text).not.toContain(COVERAGE);
+    expect(silent).toBeGreaterThan(note);
+    expect(text.slice(note + NOTE.length, silent).trim()).toBe("");
+  });
+
+  it("changes no count and removes no row: tally and both sides' rows still print with the sentence", async () => {
+    const text = await renderWeek("2026-W44");
+
+    expect(text).toContain(TALLY);
+    expect(text).toContain("İktidar tarafı kör noktası");
+    expect(text).toContain("Muhalefet tarafı kör noktası");
+    expect(mocks.summariseCalls).toHaveLength(1);
+    expect(mocks.summariseCalls[0]![0]).toEqual([{ id: "cl-1" }]);
+  });
+
+  it("still prints when the week read failed or is empty (the note and caveats print then too)", async () => {
+    mocks.getWeekArchiveClusters.mockResolvedValue(null);
+    expect(await renderWeek("2026-W44")).toContain(SILENT_TEXT);
+
+    mocks.getWeekArchiveClusters.mockResolvedValue({ rows: [], truncated: false });
+    expect(await renderWeek("2026-W44")).toContain(SILENT_TEXT);
+  });
+
+  it("adds no 'Bu hafta' wording to a closed week", async () => {
+    const text = await renderWeek("2026-W44");
+
+    expect(text.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
   });
 });
 

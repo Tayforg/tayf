@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 
+import type { DarkZoneGroup } from "@/lib/trends/dark-sources";
+
 import {
   blindspotTallyLine,
+  silentSourcesCaveat,
   weekCopy,
   weekCopyFor,
   weekCoverageCaveat,
@@ -451,5 +454,110 @@ describe("blindspotTallyLine", () => {
     for (const term of ["payda", "veto", "72 saat", "sürüyor", "/kaynaklar/durum"]) {
       expect(line, term).not.toContain(term);
     }
+  });
+});
+
+// h207-weekly-1: a closed week's archive page names the voting sources that
+// delivered nothing that week although they delivered materially in the weeks
+// around it, and says the zone shares are not one-to-one comparable with those
+// weeks. It matches what /trends says (h90-trends-2). The page asks this one
+// question of the groups the RPC returned and gets the string or null; it is a
+// standalone function (the live and rolling wording never print it), so it is
+// not a WeekCopy field.
+describe("silentSourcesCaveat", () => {
+  const TWO_ZONES: DarkZoneGroup[] = [
+    { zone: "iktidar", names: ["En Son Haber"] },
+    { zone: "muhalefet", names: ["Artı Gerçek", "Halk TV"] },
+  ];
+  const TWO_ZONES_TEXT =
+    "O hafta 3 spektrum kaynağı hiç veri vermedi (İktidar: En Son Haber; Muhalefet: Artı Gerçek, Halk TV). " +
+    "Bu kaynaklar yakın haftalarda düzenli haber veriyordu; bölge payları bu yüzden o haftalarla birebir karşılaştırılamaz.";
+
+  it("returns null for null (the read failed or the RPC is not applied yet) and for an empty list", () => {
+    expect(silentSourcesCaveat(null)).toBeNull();
+    expect(silentSourcesCaveat([])).toBeNull();
+  });
+
+  it("returns null when every group is empty (no name to print)", () => {
+    expect(
+      silentSourcesCaveat([
+        { zone: "iktidar", names: [] },
+        { zone: "muhalefet", names: [] },
+      ]),
+    ).toBeNull();
+  });
+
+  it("prints the exact Turkish string for a two-zone fixture: the total, then 'Bölge: A, B' per group", () => {
+    expect(silentSourcesCaveat(TWO_ZONES)).toBe(TWO_ZONES_TEXT);
+  });
+
+  it("follows the order of the groups it is given and joins zones with '; '", () => {
+    const all: DarkZoneGroup[] = [
+      { zone: "iktidar", names: ["A"] },
+      { zone: "bagimsiz", names: ["B", "C"] },
+      { zone: "muhalefet", names: ["D"] },
+    ];
+    expect(silentSourcesCaveat(all)).toContain("(İktidar: A; Bağımsız: B, C; Muhalefet: D)");
+    expect(silentSourcesCaveat(all)).toContain("O hafta 4 spektrum kaynağı hiç veri vermedi");
+  });
+
+  it("says 'kaynağı' after the numeral and the singular 'Bu kaynak' for one source", () => {
+    const text = silentSourcesCaveat([{ zone: "bagimsiz", names: ["Bengütürk"] }]);
+    expect(text).toBe(
+      "O hafta 1 spektrum kaynağı hiç veri vermedi (Bağımsız: Bengütürk). " +
+        "Bu kaynak yakın haftalarda düzenli haber veriyordu; bölge payları bu yüzden o haftalarla birebir karşılaştırılamaz.",
+    );
+    expect(text).not.toContain("Bu kaynaklar");
+  });
+
+  it("keeps the plural 'Bu kaynaklar' for two sources in one zone", () => {
+    const text = silentSourcesCaveat([{ zone: "muhalefet", names: ["Artı Gerçek", "Halk TV"] }]);
+    expect(text).toContain("O hafta 2 spektrum kaynağı");
+    expect(text).toContain("Bu kaynaklar yakın haftalarda düzenli haber veriyordu");
+    expect(text).not.toContain("Bu kaynak yakın");
+  });
+
+  it("counts the sources across zones: one name in each of two zones is plural", () => {
+    const text = silentSourcesCaveat([
+      { zone: "iktidar", names: ["A"] },
+      { zone: "muhalefet", names: ["B"] },
+    ]);
+    expect(text).toContain("O hafta 2 spektrum kaynağı");
+    expect(text).toContain("Bu kaynaklar yakın haftalarda");
+  });
+
+  it("groups a count of a thousand or more the Turkish way", () => {
+    const names = Array.from({ length: 1234 }, (_, i) => `K${i}`);
+    expect(silentSourcesCaveat([{ zone: "iktidar", names }])).toContain("O hafta 1.234 spektrum kaynağı");
+  });
+
+  it("does not mutate its input", () => {
+    const input: DarkZoneGroup[] = [{ zone: "iktidar", names: ["Z", "A"] }];
+    const copy = JSON.parse(JSON.stringify(input)) as DarkZoneGroup[];
+    silentSourcesCaveat(input);
+    expect(input).toEqual(copy);
+  });
+
+  it("is a closed-week string: no 'bu hafta', no developer jargon, no live-health term", () => {
+    const lower = (silentSourcesCaveat(TWO_ZONES) as string).toLocaleLowerCase("tr-TR");
+    for (const term of [
+      "bu hafta",
+      "payda",
+      "veto",
+      "72 saat",
+      "şu anda bilinmiyor",
+      "sürüyor",
+      "/kaynaklar/durum",
+    ]) {
+      expect(lower, term).not.toContain(term);
+    }
+  });
+
+  it("reads like /trends' sentence: names the sources, says why the shares move, says what is not comparable", () => {
+    const text = silentSourcesCaveat(TWO_ZONES) as string;
+    expect(text).toContain("hiç veri vermedi");
+    expect(text).toContain("birebir karşılaştırılamaz");
+    // Not the /trends wording ("veri vermeyi bıraktı"): these sources never delivered in this week at all.
+    expect(text).not.toContain("bıraktı");
   });
 });

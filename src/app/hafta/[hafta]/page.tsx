@@ -14,9 +14,14 @@ import {
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { sharePageMetadata } from "@/lib/seo/page-metadata";
 import { getFeedStatusSummary } from "@/lib/sources/feed-status";
-import { weekCopy, weekCoverageCaveat } from "@/lib/weekly/week-copy";
+import {
+  silentSourcesCaveat,
+  weekCopy,
+  weekCoverageCaveat,
+} from "@/lib/weekly/week-copy";
 import {
   getWeekArchiveClusters,
+  getWeekSilentVotingSources,
   parseWeekKey,
   shiftWeek,
   weekKeyFromMs,
@@ -105,7 +110,7 @@ export default async function WeekArchivePage({ params }: PageProps) {
   // progress and for every week from the cut-off on.
   const coverageCaveat = isCurrentWeek ? null : weekCoverageCaveat(copy, hafta);
 
-  const [read, health, feedStatus] = await Promise.all([
+  const [read, health, feedStatus, silentSources] = await Promise.all([
     getWeekArchiveClusters(hafta),
     // Health is only meaningful for the week still in progress — it is
     // not known retroactively for a past, closed week.
@@ -115,7 +120,14 @@ export default async function WeekArchivePage({ params }: PageProps) {
     // anda bilinmiyor", which looks like an outage. Never rejects (null on a
     // failed read); a closed week has no live status and never reads it.
     isCurrentWeek ? getFeedStatusSummary() : Promise.resolve(null),
+    // The voting sources that delivered nothing in a closed week although they
+    // delivered materially around it (h207-weekly-1, migration 219). The week in
+    // progress never asks. null while 219 is not applied yet or on a failed read:
+    // the page then prints no extra line and no error.
+    isCurrentWeek ? Promise.resolve(null) : getWeekSilentVotingSources(hafta),
   ]);
+  // Copy only, like the coverage caveat above: the counts and rows are untouched.
+  const silentCaveat = silentSourcesCaveat(silentSources);
 
   const rows = read?.rows ?? null;
   const summary =
@@ -140,6 +152,7 @@ export default async function WeekArchivePage({ params }: PageProps) {
 
       <p className={`${proseClass}`}>{copy.note}</p>
       {coverageCaveat ? <p className={proseClass}>{coverageCaveat}</p> : null}
+      {silentCaveat ? <p className={proseClass}>{silentCaveat}</p> : null}
 
       {rows === null ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">

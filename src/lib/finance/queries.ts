@@ -8,6 +8,7 @@ import {
   fetchLegalNoticeIdsSince,
   fetchLowRelevanceSince,
   fetchRelevanceScores,
+  fetchRelevanceScoresWithStatus,
   filterFeedTickers,
   isHiddenMatch,
   isLegalNotice,
@@ -221,7 +222,11 @@ export interface TickerPage {
   company: Company | null;
   attention: AttentionDay[];
   articles: FeedItem[];
-  /** True when ticker_articles returned its full page, so older articles exist. */
+  /**
+   * True when more articles passed the gates than the list shows (TICKER_ARTICLES_LIMIT), or when
+   * ticker_articles returned its full TICKER_ARTICLES_FETCH window, so older articles may exist, or when the
+   * relevance read failed and ticker_articles returned more than TICKER_ARTICLES_LIMIT rows.
+   */
   articlesTruncated: boolean;
   disclosures: Disclosure[];
   /** All of the ticker's disclosures in the last 30 days (breakers excluded); null when the count failed. */
@@ -1097,8 +1102,22 @@ export function filterCoverageRows<T extends { article_id: string }>(
   );
 }
 
-/** ticker_articles' page size; a full page means older articles exist. */
+/**
+ * The per-ticker article list's display cap, and the "legacy window": an article with no Jev score
+ * stays only while it sits among the first TICKER_ARTICLES_LIMIT raw ticker_articles rows (see
+ * readTickerPage).
+ */
 const TICKER_ARTICLES_LIMIT = 60;
+/**
+ * h207-ekonomi-2: how many rows readTickerPage asks ticker_articles for, 2.5 x TICKER_ARTICLES_LIMIT.
+ * The relevance and notice gates run AFTER the RPC, so a cut at 60 raw rows left a busy ticker with a
+ * short list (TOASO: 174 raw rows, the newest 60 leave 16, the newest 150 leave 62) and a ticker
+ * with none printed 'son 0 haber' (NOBEL 83 raw rows, FRMPL 102, none pass). 150 is read-only
+ * replayed as enough to fill 60 on TOASO and THYAO, and small enough to stay one bounded RPC read
+ * (p_limit is applied inside the function, migration 054; no migration is needed). The /ekonomi feed
+ * over-fetches for the same reason (ECON_FEED_OVERFETCH).
+ */
+const TICKER_ARTICLES_FETCH = 150;
 /** Display cap of the per-ticker disclosure list (and of the "Medyada yankı" panel). */
 const TICKER_DISCLOSURES_LIMIT = 60;
 
@@ -1167,7 +1186,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
     ),
     // Starts from the indexed article_tickers side (migration 054); the
     // embedded-filter form timed out in production.
-    supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: TICKER_ARTICLES_LIMIT }),
+    supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: TICKER_ARTICLES_FETCH }),
     // The disclosure list, then the coverage of exactly those disclosures. The
     // two are chained inside ONE branch so the other reads above still run in
     // parallel with them. The 30-day total (fail-open) runs in parallel with
@@ -1253,24 +1272,29 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
     ]),
   ];
   // h108-kapdisclosures-2: runs beside the relevance lookup; it never rejects.
-  const [scores, pressCode] = await Promise.all([
-    fetchRelevanceScores(supabase, relevanceKeys),
+  const [{ scores, complete: relevanceComplete }, pressCode] = await Promise.all([
+    fetchRelevanceScoresWithStatus(supabase, relevanceKeys),
     readPressCode(supabase, ticker, c?.tickers ?? [], attentionRes.rows.length, attentionSinceIso),
   ]);
   const attention = aggregateAttention(attentionRaw, scores, legalIds).map((d) => ({ day: d.day, articles: d.articles, sources: d.sources }));
   attention.sort((a, b) => a.day.localeCompare(b.day));
   const baselineDaily = attention.reduce((s, d) => s + d.articles, 0) / 30;
+  // h207-ekonomi-2: the gates run over the whole TICKER_ARTICLES_FETCH window, then the list is cut to
+  // TICKER_ARTICLES_LIMIT. Legacy guard: an UNSCORED row (pre-Jev, or the relevance read failed) is kept only
+  // inside the first TICKER_ARTICLES_LIMIT raw rows, the window the page showed before the fetch widened.
+  // Rows beyond it need a real score (>= TICKER_HIDE_BELOW), so widening exposes no old unscored rows
+  // (NOBEL's and FRMPL's alias matches), and a failed relevance read still shows the newest 60 as before.
+  const gatedArticles = articleRows.filter((r, i) => {
+    if (legalIds.has(r.id) || isLegalNotice(r.title, r.url) || isPaidContentUrl(r.url)) return false;
+    const score = scores.get(relevanceKey(r.id, ticker));
+    if (isHiddenMatch(score)) return false;
+    return score !== undefined || i < TICKER_ARTICLES_LIMIT;
+  });
   return {
     company: c ? { kapMemberOid: c.kap_member_oid, tickers: c.tickers, title: c.title, city: c.city, sharesTraded: c.shares_traded } : null,
     attention,
-    articles: articleRows
-      .filter(
-        (r) =>
-          !legalIds.has(r.id) &&
-          !isLegalNotice(r.title, r.url) &&
-          !isPaidContentUrl(r.url) &&
-          !isHiddenMatch(scores.get(relevanceKey(r.id, ticker))),
-      )
+    articles: gatedArticles
+      .slice(0, TICKER_ARTICLES_LIMIT)
       .map((r) => ({
         id: r.id,
         title: r.title,
@@ -1280,7 +1304,15 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
         source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
         tickers: [ticker],
       })),
-    articlesTruncated: articleRows.length >= TICKER_ARTICLES_LIMIT,
+    // More passed the gates than the list shows, or the RPC window was full (older rows may exist). Never
+    // derived from the raw count alone: that read 'son 0 haber' on a ticker whose 60 raw rows all failed the gates.
+    // A FAILED relevance read leaves every row beyond the first 60 unscored, so the legacy guard drops them and
+    // gatedArticles can never pass 60; rows past index 60 still prove older articles exist, so the flag keeps the
+    // old 'son 60 haber' wording (it came from the raw count before this change) instead of waiting for the 150 cap.
+    articlesTruncated:
+      gatedArticles.length > TICKER_ARTICLES_LIMIT ||
+      articleRows.length >= TICKER_ARTICLES_FETCH ||
+      (!relevanceComplete && articleRows.length > TICKER_ARTICLES_LIMIT),
     disclosures,
     totalDisclosures30d,
     coverage: coverageStats(
