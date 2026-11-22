@@ -105,9 +105,13 @@ export function coverageScopeNote(listed: number, counted: number): string {
   return `${base} Hisseyi yalnızca anan ${left} bildirim (işlem sırası kapatma ve açma, işlem yasağı, pay alım satım bildirimi gibi) sayılmaz.`;
 }
 
-/** "13 haber", or "son 60 haber" when the article list was cut at its cap. */
+/**
+ * "13 haber", or "son 60 haber" when the article list was cut at its cap or fetch window. An empty
+ * list is always "0 haber": "son 0 haber" (h207-ekonomi-2: NOBEL, FRMPL) read as a count of the last
+ * zero stories above the "henüz eşleşmedi" empty state.
+ */
 export function articleCountLabel(shown: number, truncated: boolean): string {
-  return truncated ? `son ${shown} haber` : `${shown} haber`;
+  return truncated && shown > 0 ? `son ${shown} haber` : `${shown} haber`;
 }
 
 // Borsa Istanbul pay piyasasi fiyat adimi (equity price tick) table, in kurus

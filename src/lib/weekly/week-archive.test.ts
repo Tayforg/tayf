@@ -155,6 +155,13 @@ const supabaseState = vi.hoisted(() => ({
     range: { from: number; to: number } | null;
     limit: number | null;
   }>,
+  /** The RPC surface (h207-weekly-1): every call, the answer, and a way to make the call itself throw. */
+  rpcCalls: [] as Array<{ name: string; args: unknown }>,
+  rpcResult: { data: [], error: null } as {
+    data: unknown;
+    error: { message: string; code?: string } | null;
+  },
+  rpcRejects: null as Error | null,
 }));
 
 // The fetcher must use the capped createReaderClient (4 s fail-fast).
@@ -172,6 +179,11 @@ vi.mock("@/lib/supabase/server", () => ({
 
 function makeFakeClient() {
   return {
+    rpc: (name: string, args: unknown) => {
+      supabaseState.rpcCalls.push({ name, args });
+      if (supabaseState.rpcRejects !== null) return Promise.reject(supabaseState.rpcRejects);
+      return Promise.resolve(supabaseState.rpcResult);
+    },
     from: () => {
       const request: (typeof supabaseState.requests)[number] = { orders: [], range: null, limit: null };
       const builder: Record<string, unknown> = {};
@@ -224,6 +236,9 @@ beforeEach(() => {
   supabaseState.calls.lt = [];
   supabaseState.calls.lte = [];
   supabaseState.requests = [];
+  supabaseState.rpcCalls = [];
+  supabaseState.rpcResult = { data: [], error: null };
+  supabaseState.rpcRejects = null;
   clientFactories.createReaderClient.mockReset();
   clientFactories.createReaderClient.mockImplementation(() => makeFakeClient());
   clientFactories.createServerClient.mockReset();
@@ -487,6 +502,234 @@ describe("getWeekArchiveClusters read profile + cache lifetime", () => {
     expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
       vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getWeekSilentVotingSources (h207-weekly-1): the voting sources that delivered
+// nothing in the week although they delivered materially in the 28 days around
+// it, read through migration 219's `week_silent_voting_sources`. null = could
+// not be read (an error, a throw, a timeout, or 219 not applied yet); [] = read
+// fine, nobody was silent. Never throws.
+// ---------------------------------------------------------------------------
+
+describe("getWeekSilentVotingSources", () => {
+  const TIMEOUT_MESSAGE = "AbortError: Supabase request exceeded 4000 ms";
+
+  const rows = [
+    { slug: "halk-tv", name: "Halk TV", bias: "opposition_leaning" },
+    { slug: "dunya", name: "Dünya", bias: "center" },
+    { slug: "en-son-haber", name: "En Son Haber", bias: "gov_leaning" },
+    { slug: "calik", name: "Çalık", bias: "center" },
+    { slug: "cumhuriyet", name: "Cumhuriyet", bias: "center" },
+    { slug: "arti-gercek", name: "Artı Gerçek", bias: "opposition_leaning" },
+  ];
+
+  it("calls the RPC with exactly the week's bounds (weekRange), nothing else", async () => {
+    const { getWeekSilentVotingSources, weekRange } = await import("./week-archive");
+
+    await getWeekSilentVotingSources("2026-W46");
+
+    const range = weekRange("2026-W46")!;
+    expect(supabaseState.rpcCalls).toEqual([
+      {
+        name: "week_silent_voting_sources",
+        args: { p_from: range.startIso, p_to: range.endIso },
+      },
+    ]);
+    expect(range).toEqual({
+      startIso: "2026-11-08T21:00:00.000Z",
+      endIso: "2026-11-15T21:00:00.000Z",
+    });
+  });
+
+  it("builds its client with the capped createReaderClient (4 s), never the plain one, and reads no table", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+
+    await getWeekSilentVotingSources("2026-W46");
+
+    expect(clientFactories.createReaderClient).toHaveBeenCalledTimes(1);
+    expect(clientFactories.createServerClient).not.toHaveBeenCalled();
+    expect(supabaseState.requests).toHaveLength(0);
+  });
+
+  it("groups by zone in the order iktidar, bagimsiz, muhalefet and sorts names with the Turkish collation", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    supabaseState.rpcResult = { data: rows, error: null };
+
+    const groups = await getWeekSilentVotingSources("2026-W46");
+
+    expect(groups).toEqual([
+      { zone: "iktidar", names: ["En Son Haber"] },
+      // "Çalık" sorts between "Cumhuriyet" and "Dünya" in Turkish (C < Ç < D), not after "Dünya" as in code-point order.
+      { zone: "bagimsiz", names: ["Cumhuriyet", "Çalık", "Dünya"] },
+      { zone: "muhalefet", names: ["Artı Gerçek", "Halk TV"] },
+    ]);
+  });
+
+  it("drops a zone without a name", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    supabaseState.rpcResult = {
+      data: [{ slug: "halk-tv", name: "Halk TV", bias: "opposition" }],
+      error: null,
+    };
+
+    await expect(getWeekSilentVotingSources("2026-W46")).resolves.toEqual([
+      { zone: "muhalefet", names: ["Halk TV"] },
+    ]);
+  });
+
+  it("skips a row it cannot place (unknown bias, a missing name) instead of failing the read", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    supabaseState.rpcResult = {
+      data: [
+        { slug: "x", name: "Bilinmeyen", bias: "not-a-bias" },
+        { slug: "y", name: null, bias: "center" },
+        null,
+        { slug: "halk-tv", name: "Halk TV", bias: "opposition" },
+      ],
+      error: null,
+    };
+
+    await expect(getWeekSilentVotingSources("2026-W46")).resolves.toEqual([
+      { zone: "muhalefet", names: ["Halk TV"] },
+    ]);
+  });
+
+  it("nobody silent is a successful answer: [] cached for hours, exactly one cacheLife", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    supabaseState.rpcResult = { data: [], error: null };
+
+    await expect(getWeekSilentVotingSources("2026-W46")).resolves.toEqual([]);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+  });
+
+  it("a read is cached for hours, tagged 'sources' (a source change refreshes it) before the lifetime", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    supabaseState.rpcResult = { data: rows, error: null };
+
+    await getWeekSilentVotingSources("2026-W46");
+
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a Supabase error resolves null and is cached for 'minutes' only", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.rpcResult = { data: null, error: { message: "boom" } };
+
+    try {
+      await expect(getWeekSilentVotingSources("2026-W46")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("hours");
+  });
+
+  it("a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.rpcResult = { data: null, error: { message: TIMEOUT_MESSAGE } };
+
+    try {
+      await expect(getWeekSilentVotingSources("2026-W46")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a rejected RPC call (a throw) resolves null and is cached for 'minutes' only", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.rpcRejects = new Error("socket hang up");
+
+    try {
+      await expect(getWeekSilentVotingSources("2026-W46")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a client that cannot be built resolves null and is cached for 'minutes' only", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    clientFactories.createReaderClient.mockImplementation(() => {
+      throw new Error("no env");
+    });
+
+    try {
+      await expect(getWeekSilentVotingSources("2026-W46")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("an answer that is not a list resolves null (minutes), never a half-read", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.rpcResult = { data: { slug: "halk-tv" }, error: null };
+
+    try {
+      await expect(getWeekSilentVotingSources("2026-W46")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("migration 219 not applied yet (PGRST202) is null, cached for 'minutes', and logs nothing: the page just prints no caveat", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.rpcResult = {
+      data: null,
+      error: {
+        code: "PGRST202",
+        message: "Could not find the function public.week_silent_voting_sources(p_from, p_to) in the schema cache",
+      },
+    };
+
+    try {
+      await expect(getWeekSilentVotingSources("2026-W46")).resolves.toBeNull();
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("an invalid key resolves null BEFORE the cache: no client, no cacheTag, no cacheLife, no RPC", async () => {
+    const { getWeekSilentVotingSources } = await import("./week-archive");
+
+    await expect(getWeekSilentVotingSources("nope")).resolves.toBeNull();
+    await expect(getWeekSilentVotingSources("2026-W54")).resolves.toBeNull();
+    await expect(getWeekSilentVotingSources("")).resolves.toBeNull();
+
+    expect(clientFactories.createReaderClient).not.toHaveBeenCalled();
+    expect(supabaseState.rpcCalls).toHaveLength(0);
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
   });
 });
 

@@ -56,6 +56,9 @@ const fixture = vi.hoisted(() => ({
   // entry per request) and a switch that makes that read fail.
   jevInBatches: [] as string[][],
   jevError: null as string | null,
+  // h207-ekonomi-2: jevError applies once more than this many `.in('subject_id', ...)` batches were sent (0 = every batch fails;
+  // 1 = the first chunk succeeds and the second one fails).
+  jevErrorAfterBatches: 0,
   bistCompanies: [] as Array<{ tickers: string[]; title: string; shares_traded?: boolean }>,
   // Builder state of every bist_companies read, and an error switch for it.
   companyStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
@@ -168,7 +171,9 @@ const supabaseFake = await vi.hoisted(async () => {
         const inFilter = s.in.find((i) => i.col === "subject_id");
         if (inFilter) {
           fixture.jevInBatches.push([...(inFilter.vals as string[])]);
-          if (fixture.jevError) return { data: null, error: { message: fixture.jevError } };
+          if (fixture.jevError && fixture.jevInBatches.length > fixture.jevErrorAfterBatches) {
+            return { data: null, error: { message: fixture.jevError } };
+          }
           const wanted = new Set(inFilter.vals as string[]);
           return { data: fixture.jevRows.filter((r) => wanted.has(r.subject_id)), error: null };
         }
@@ -286,6 +291,7 @@ beforeEach(() => {
   fixture.jevRows = [];
   fixture.jevInBatches = [];
   fixture.jevError = null;
+  fixture.jevErrorAfterBatches = 0;
   fixture.bistCompanies = [];
   fixture.companyStates = [];
   fixture.companyError = null;
@@ -2600,16 +2606,6 @@ describe("h11-finance-3: fetchTickerPage reports honest windows", () => {
     summary: null,
     disclosure_class: "ODA",
   });
-  const articleRow = (i: number) => ({
-    id: `art-${i}`,
-    title: `ISMEN haberi ${i}`,
-    url: `https://x/${i}`,
-    published_at: `2026-09-12T${String(i % 24).padStart(2, "0")}:00:00Z`,
-    category: "ekonomi",
-    source_name: "Dünya",
-    source_slug: "dunya",
-    matched_on: "alias",
-  });
 
   it("totalDisclosures30d comes from a head:true count read with the same or() and the same 30-day cut", async () => {
     freeze();
@@ -2665,21 +2661,14 @@ describe("h11-finance-3: fetchTickerPage reports honest windows", () => {
     }
   });
 
-  it("articlesTruncated is true exactly when ticker_articles returned its full 60 rows", async () => {
-    freeze();
-    fixture.tickerArticlesRows = Array.from({ length: 60 }, (_, i) => articleRow(i));
-    expect((await fetchTickerPage("ISMEN")).articlesTruncated).toBe(true);
-    fixture.tickerArticlesRows = Array.from({ length: 59 }, (_, i) => articleRow(i));
-    expect((await fetchTickerPage("ISMEN")).articlesTruncated).toBe(false);
-    fixture.tickerArticlesRows = [];
-    expect((await fetchTickerPage("ISMEN")).articlesTruncated).toBe(false);
-  });
+  // h207-ekonomi-2: the truncation test that stood here ("true exactly when ticker_articles returned
+  // its full 60 rows") moved to the h207-ekonomi-2 block below, rewritten to the new definition.
 
-  it("asks ticker_articles for exactly 60 rows", async () => {
+  it("asks ticker_articles for its 150-row window (2.5 x the 60-row display cap, h207-ekonomi-2)", async () => {
     freeze();
     await fetchTickerPage("ISMEN");
     const call = supabaseFake.calls.rpc.find((c) => c.name === "ticker_articles");
-    expect(call?.args).toEqual({ p_ticker: "ISMEN", p_limit: 60 });
+    expect(call?.args).toEqual({ p_ticker: "ISMEN", p_limit: 150 });
   });
 
   it("the coverage read selects article_id, so the same article is counted once per event", async () => {
@@ -2725,6 +2714,258 @@ describe("h11-finance-3: fetchTickerPage reports honest windows", () => {
     const page = await fetchTickerPage("TRHOL");
     expect(page.disclosures.map((d) => d.disclosureIndex)).toEqual([1688666]);
     expect(latestTradingHalt(page.disclosures)?.disclosureIndex).toBe(1688666);
+  });
+});
+
+// h207-ekonomi-2: ticker_articles was asked for 60 rows and the relevance gate ran AFTER that cut, so a busy
+// ticker with many Jev-hidden matches showed a short list (TOASO: 174 raw rows, newest 60 left 16, while 62 of
+// the newest 150 qualify) and a ticker with none printed 'son 0 haber' (NOBEL, FRMPL). The RPC is now asked for
+// 150 rows; the gate runs over all of them; the list is cut to 60 AFTER the gate. An UNSCORED row stays only
+// inside the first 60 raw rows (today's window), so pre-Jev legacy rows are not newly exposed.
+describe("h207-ekonomi-2: the per-ticker article list fills up to 60 rows after the relevance gate", () => {
+  const NOW = "2026-11-22T03:00:00Z";
+  const T = "TOASO";
+  const freeze = () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+  };
+  // Raw RPC order is newest first: r0 is the newest.
+  const rawRow = (i: number) => ({
+    id: `r${i}`,
+    title: `Tofaş haberi ${i}`,
+    url: `https://x/${i}`,
+    published_at: new Date(Date.parse("2026-11-21T20:00:00Z") - i * 3_600_000).toISOString(),
+    category: "ekonomi",
+    source_name: "Dünya",
+    source_slug: "dunya",
+    matched_on: "alias:tofaş",
+  });
+  const seedRaw = (n: number) => {
+    fixture.tickerArticlesRows = Array.from({ length: n }, (_, i) => rawRow(i));
+  };
+  const jev = (i: number, p: number) => ({ subject_id: `r${i}:${T}`, jev_prob: p, created_at: "2026-11-21T20:00:00Z" });
+  const ids = (page: { articles: Array<{ id: string }> }) => page.articles.map((a) => a.id);
+  const range = (from: number, to: number) => Array.from({ length: to - from }, (_, k) => `r${from + k}`);
+
+  it("(a) 150 raw rows, the newest 60 scored 0.1 and rows 61-150 scored 0.9: 60 shown (r60..r119), truncated", async () => {
+    freeze();
+    seedRaw(150);
+    fixture.jevRows = Array.from({ length: 150 }, (_, i) => jev(i, i < 60 ? 0.1 : 0.9));
+
+    const page = await fetchTickerPage(T);
+
+    expect(ids(page)).toEqual(range(60, 120));
+    expect(page.articlesTruncated).toBe(true);
+    // The relevance keys of ALL 150 raw rows (not just the first 60) went through fetchRelevanceScores.
+    const asked = new Set(fixture.jevInBatches.flat());
+    expect(asked.has(`r0:${T}`)).toBe(true);
+    expect(asked.has(`r149:${T}`)).toBe(true);
+    // ... in chunks of at most RELEVANCE_CHUNK.
+    expect(Math.max(...fixture.jevInBatches.map((b) => b.length))).toBeLessThanOrEqual(100);
+  });
+
+  it("(b) an unscored row at raw index 10 is kept; an unscored row at raw index 70 is dropped", async () => {
+    freeze();
+    seedRaw(90);
+    // Every row scored 0.1 (hidden) except: r10 and r70 unscored, r80 scored 0.9.
+    fixture.jevRows = Array.from({ length: 90 }, (_, i) => jev(i, i === 80 ? 0.9 : 0.1)).filter(
+      (r) => r.subject_id !== `r10:${T}` && r.subject_id !== `r70:${T}`,
+    );
+
+    const page = await fetchTickerPage(T);
+
+    expect(ids(page)).toEqual(["r10", "r80"]);
+    expect(page.articlesTruncated).toBe(false);
+  });
+
+  it("(b) the legacy guard's edge: an unscored row at raw index 59 is kept, at raw index 60 it is dropped", async () => {
+    freeze();
+    seedRaw(80);
+    fixture.jevRows = Array.from({ length: 80 }, (_, i) => jev(i, 0.1)).filter(
+      (r) => r.subject_id !== `r59:${T}` && r.subject_id !== `r60:${T}`,
+    );
+
+    const page = await fetchTickerPage(T);
+
+    expect(ids(page)).toEqual(["r59"]);
+  });
+
+  it("(b) beyond raw index 60 a scored row needs TICKER_HIDE_BELOW: 0.35 is kept, 0.349 is dropped", async () => {
+    freeze();
+    seedRaw(80);
+    fixture.jevRows = Array.from({ length: 80 }, (_, i) => jev(i, i === 70 ? 0.35 : i === 71 ? 0.349 : 0.1));
+
+    const page = await fetchTickerPage(T);
+
+    expect(ids(page)).toEqual(["r70"]);
+  });
+
+  it("(b) the notice and paid-url gates still apply to rows beyond raw index 60", async () => {
+    freeze();
+    seedRaw(80);
+    (fixture.tickerArticlesRows as Array<{ id: string; url: string }>)[70]!.url = "https://www.dunya.com/advertorial/tofas-1";
+    fixture.jevRows = Array.from({ length: 80 }, (_, i) => jev(i, i >= 70 && i <= 72 ? 0.9 : 0.1));
+    fixture.legalNotices = [{ article_id: "r71", published_at: "2026-11-21T10:00:00Z" }];
+
+    const page = await fetchTickerPage(T);
+
+    // r70 is a paid url, r71 a legal notice; r72 is the only one left.
+    expect(ids(page)).toEqual(["r72"]);
+  });
+
+  it("(c) the relevance read fails: the first 60 raw rows are shown, exactly as before the change (fail-open)", async () => {
+    freeze();
+    seedRaw(150);
+    fixture.jevError = "canceling statement due to statement timeout";
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const page = await fetchTickerPage(T);
+
+      expect(ids(page)).toEqual(range(0, 60));
+      // The full RPC window came back, so older rows exist.
+      expect(page.articlesTruncated).toBe(true);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes("ticker relevance unavailable"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("(c) a relevance read that fails on a LATER chunk drops the unscored rows beyond raw index 60, keeps the scored ones", async () => {
+    freeze();
+    seedRaw(150);
+    // Keys go out in raw order: chunk 1 = r0..r99 (scored), chunk 2 = r100..r149 (lost, so unscored).
+    // r0..r59 score 0.1, r60..r99 score 0.9. Without the guard r100..r119 would fill the list up to 60.
+    fixture.jevRows = Array.from({ length: 150 }, (_, i) => jev(i, i < 60 ? 0.1 : 0.9));
+    fixture.jevError = "canceling statement due to statement timeout";
+    fixture.jevErrorAfterBatches = 1;
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const page = await fetchTickerPage(T);
+
+      expect(ids(page)).toEqual(range(60, 100));
+      expect(page.articlesTruncated).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // A failed relevance read leaves every row beyond raw index 60 unscored, and the legacy guard drops them, so
+  // the gated list can never grow past 60. Rows past index 60 prove older articles exist, so the flag has to
+  // come from the raw count then (the label keeps the pre-change 'son 60 haber'), not only from the 150-row cap.
+  it("(c) the relevance read fails with 129 raw rows: the first 60 are shown and the list is truncated (older rows exist)", async () => {
+    freeze();
+    seedRaw(129);
+    fixture.jevError = "canceling statement due to statement timeout";
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const page = await fetchTickerPage(T);
+
+      expect(ids(page)).toEqual(range(0, 60));
+      expect(page.articlesTruncated).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("(c) the relevance read fails with exactly 61 raw rows: truncated, one older row exists", async () => {
+    freeze();
+    seedRaw(61);
+    fixture.jevError = "canceling statement due to statement timeout";
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const page = await fetchTickerPage(T);
+
+      expect(ids(page)).toEqual(range(0, 60));
+      expect(page.articlesTruncated).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("(c) the relevance read fails with exactly 60 raw rows: NOT truncated, nothing older exists", async () => {
+    freeze();
+    seedRaw(60);
+    fixture.jevError = "canceling statement due to statement timeout";
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const page = await fetchTickerPage(T);
+
+      expect(ids(page)).toEqual(range(0, 60));
+      expect(page.articlesTruncated).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("(d) 90 raw rows with 25 passing: 25 shown in raw order, not truncated", async () => {
+    freeze();
+    seedRaw(90);
+    const passing = new Set(Array.from({ length: 25 }, (_, k) => k * 3 + 1)); // r1, r4, ... r73
+    fixture.jevRows = Array.from({ length: 90 }, (_, i) => jev(i, passing.has(i) ? 0.9 : 0.1));
+
+    const page = await fetchTickerPage(T);
+
+    expect(ids(page)).toEqual([...passing].map((i) => `r${i}`));
+    expect(page.articles).toHaveLength(25);
+    expect(page.articlesTruncated).toBe(false);
+  });
+
+  it("a ticker whose every raw row is hidden or unscored-and-old gets an empty list, not truncated", async () => {
+    freeze();
+    seedRaw(83); // NOBEL's shape: 83 raw rows, 0 pass
+    fixture.jevRows = Array.from({ length: 83 }, (_, i) => jev(i, 0.1));
+
+    const page = await fetchTickerPage(T);
+
+    expect(page.articles).toEqual([]);
+    expect(page.articlesTruncated).toBe(false);
+  });
+
+  describe("(e) articlesTruncated = more than 60 rows passed the gates, or the RPC returned its full 150-row window", () => {
+    const scoreAll = (n: number, p: (i: number) => number) => {
+      fixture.jevRows = Array.from({ length: n }, (_, i) => jev(i, p(i)));
+    };
+
+    it("60 raw rows, all passing: 60 shown and NOT truncated (nothing was cut)", async () => {
+      freeze();
+      seedRaw(60);
+      scoreAll(60, () => 0.9);
+      const page = await fetchTickerPage(T);
+      expect(page.articles).toHaveLength(60);
+      expect(page.articlesTruncated).toBe(false);
+    });
+
+    it("61 raw rows, all passing: 60 shown and truncated", async () => {
+      freeze();
+      seedRaw(61);
+      scoreAll(61, () => 0.9);
+      const page = await fetchTickerPage(T);
+      expect(page.articles).toHaveLength(60);
+      expect(page.articlesTruncated).toBe(true);
+    });
+
+    it("149 raw rows with 25 passing: not truncated; 150 raw rows with 25 passing: truncated (older rows may exist)", async () => {
+      freeze();
+      seedRaw(149);
+      scoreAll(149, (i) => (i % 6 === 0 ? 0.9 : 0.1)); // r0, r6 ... r144: 25 of 149
+      const below = await fetchTickerPage(T);
+      expect(below.articles).toHaveLength(25);
+      expect(below.articlesTruncated).toBe(false);
+
+      seedRaw(150);
+      scoreAll(150, (i) => (i % 6 === 0 ? 0.9 : 0.1)); // still 25 (r0 ... r144)
+      const full = await fetchTickerPage(T);
+      expect(full.articles).toHaveLength(25);
+      expect(full.articlesTruncated).toBe(true);
+    });
+
+    it("59 raw rows (unscored) and an empty RPC result are not truncated", async () => {
+      freeze();
+      seedRaw(59);
+      expect((await fetchTickerPage(T)).articlesTruncated).toBe(false);
+      seedRaw(0);
+      expect((await fetchTickerPage(T)).articlesTruncated).toBe(false);
+    });
   });
 });
 

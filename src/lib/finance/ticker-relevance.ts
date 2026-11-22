@@ -124,14 +124,19 @@ export type RelevanceSupabase = SupabaseClient;
  * package). FAIL-OPEN: a chunk error warns and returns everything
  * accumulated so far rather than throwing — callers must treat a missing
  * key exactly like "not yet scored".
+ *
+ * `complete` is false when a chunk errored (the scores of the chunks read
+ * before it are kept). h207-ekonomi-2: readTickerPage needs it to tell
+ * "unscored because Jev has not reached it" from "unscored because the read
+ * failed", which changes whether older articles are known to exist.
  */
-export async function fetchRelevanceScores(
+export async function fetchRelevanceScoresWithStatus(
   supabase: RelevanceSupabase,
   keys: readonly string[],
-): Promise<Map<string, number>> {
+): Promise<{ scores: Map<string, number>; complete: boolean }> {
   const scores = new Map<string, number>();
   const unique = [...new Set(keys)];
-  if (unique.length === 0) return scores;
+  if (unique.length === 0) return { scores, complete: true };
 
   for (const batch of chunk(unique, RELEVANCE_CHUNK)) {
     const { data, error } = await supabase
@@ -141,7 +146,7 @@ export async function fetchRelevanceScores(
       .in("subject_id", batch);
     if (error) {
       console.warn(`[finance] ticker relevance unavailable: ${error.message}`);
-      return scores;
+      return { scores, complete: false };
     }
     for (const row of (data ?? []) as RelevanceRow[]) {
       if (row.jev_prob == null) continue;
@@ -149,7 +154,18 @@ export async function fetchRelevanceScores(
       if (Number.isFinite(n)) scores.set(row.subject_id, n);
     }
   }
-  return scores;
+  return { scores, complete: true };
+}
+
+/**
+ * The scores of `fetchRelevanceScoresWithStatus`, without the completeness flag
+ * (same FAIL-OPEN contract: a chunk error warns and returns what was read so far).
+ */
+export async function fetchRelevanceScores(
+  supabase: RelevanceSupabase,
+  keys: readonly string[],
+): Promise<Map<string, number>> {
+  return (await fetchRelevanceScoresWithStatus(supabase, keys)).scores;
 }
 
 /**
