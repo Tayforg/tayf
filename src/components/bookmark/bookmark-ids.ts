@@ -77,6 +77,19 @@ export function mergeBookmarkIds(
   };
 }
 
+/**
+ * Remove `id` (canonicalised), and only remove: null for an empty id AND for an id that is not in
+ * `current`, so a repeated or stale removal is a no-op and can never add (what toggleBookmarkId
+ * does for an absent id). The input is never mutated.
+ */
+export function removeBookmarkId(current: ReadonlySet<string>, id: string): BookmarkToggle | null {
+  const key = normaliseBookmarkId(id);
+  if (key === null || !current.has(key)) return null;
+  const next = new Set(current);
+  next.delete(key);
+  return { next, added: false, key };
+}
+
 /** Add or remove `id` (canonicalised) and return the new set, or null for an empty id. */
 export function toggleBookmarkId(current: ReadonlySet<string>, id: string): BookmarkToggle | null {
   const key = normaliseBookmarkId(id);

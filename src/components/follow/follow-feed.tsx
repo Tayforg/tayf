@@ -8,25 +8,32 @@ import { followsStore, useFollows } from "@/components/follow/use-follows";
 import { useHydrated } from "@/lib/hooks/use-hydrated";
 import {
   countNew,
-  focusTargetAfterRemove,
+  createRemoveGuard,
   FOLLOW_ITEMS_MAX,
   followApiPath,
+  followBaseline,
+  followBaselineOf,
   followEmptyText,
   followHref,
   followKey,
+  followKeysDueOnReentry,
   followLabel,
   followListCaption,
   followRowMeta,
   followRowsToShow,
+  isDeviceStampOnly,
   MAX_FOLLOWS,
   NO_BASELINE,
   parseFollowItems,
   parseFollowKey,
+  planFollowRemoval,
   rowsShown,
   runWithConcurrency,
+  serverInstant,
   type Follow,
   type FollowItem,
   type FollowKind,
+  type FollowSettle,
   type SeenBaseline,
   type SeenRows,
 } from "@/lib/follows/follows";
@@ -45,6 +52,25 @@ import {
 // (isNewItem): that also counts a story that became listed after the visit
 // although it was first published before it. For a keyword follow "yeni" is a
 // lower bound: a fresh story the search did not return cannot be counted.
+//
+// The baseline is a SERVER instant (h201-follows-1): each visit stores the ids of
+// the rows it showed and, as seenAt, the response's Date header or the newest
+// updatedAt of those rows (rowsShown), never the device clock. A follow whose
+// only stamp is addFollow's device-clock one is anchored on its first visit: the
+// response's Date header measures the device clock's skew and addedAt is moved
+// onto the server's timeline (followBaseline with a clock), so the stories listed
+// since the follow keep their "yeni" badge and a clock that is hours off can
+// neither invent nor hide one. A response without a readable Date header leaves
+// that follow without a baseline (nothing is new), as the snapshot below does.
+//
+// Activity keeps this page mounted when the reader leaves it (cacheComponents), so
+// the per-visit refs would otherwise serve the first load for ever (h201-follows-2).
+// An effect that re-runs when the page is shown again takes the follows that are
+// stale (60 s, the API's max-age) or failed (after a 10 s cool-down) out of those
+// refs, so the fetch effect after it loads them again; a fresh list stays as it
+// was (no refetch on a quick Back) and the old list stays on screen until the new
+// one lands, which also replaces that follow's baseline with what its last visit
+// stored.
 //
 // A list shows ROWS_PER_FOLLOW rows by default but grows to the last "yeni"
 // story (followRowsToShow), so the badge counts only rows on screen and the
@@ -69,8 +95,20 @@ import {
 const FETCH_CONCURRENCY = 3;
 const ROWS_PER_FOLLOW = 5;
 
+// The clock for the unfollow guard. Read in a click handler only (never while
+// rendering); behind a module-level function because react-hooks/purity cannot
+// tell a handler declared in the component body from render code.
+function nowMs(): number {
+  return Date.now();
+}
+
 type FeedState =
-  | { status: "ok"; items: FollowItem[] }
+  | {
+      status: "ok";
+      items: FollowItem[];
+      /** The response's Date header as an ISO instant (the server's clock); null when absent or unreadable. */
+      serverNow?: string | null;
+    }
   | { status: "error"; reason: "rate" | "down" };
 
 // What the polite region says once a RETRY's fetch has landed (WCAG 4.1.3).
@@ -171,7 +209,7 @@ export function followsFromSignature(
   });
 }
 
-async function fetchFollowState(
+export async function fetchFollowState(
   follow: Pick<Follow, "kind" | "value">,
   signal: AbortSignal,
 ): Promise<FeedState> {
@@ -185,7 +223,7 @@ async function fetchFollowState(
     const items = parseFollowItems(await res.json());
     return items === null
       ? { status: "error", reason: "down" }
-      : { status: "ok", items };
+      : { status: "ok", items, serverNow: serverInstant(res.headers.get("Date")) };
   } catch {
     // Network failure, bad JSON or an abort (the caller discards aborted runs).
     return { status: "error", reason: "down" };
@@ -238,6 +276,15 @@ export function FollowFeed() {
   // oldest first_published). What markSeen stores, so the next visit judges
   // "yeni" against what the reader was shown, not against the whole response.
   const shownRows = useRef<Map<string, SeenRows>>(new Map());
+  // key -> when its latest fetch settled and whether it succeeded. Read when the
+  // page is shown again (Activity), to refetch what is stale or failed.
+  const settledAt = useRef<Map<string, FollowSettle>>(new Map());
+  // Keys that re-entry took out of the refs above and whose new list has not
+  // landed yet. Their old list stays on screen meanwhile; the answer is judged
+  // against the baseline their last visit stored, and replaces the snapshot.
+  const refreshing = useRef<Set<string>>(new Set());
+  // One guard per feed against a double tap on X removing two follows.
+  const removeGuard = useRef(createRemoveGuard());
   // key -> label of a follow whose retry result must be announced. Only
   // "Tekrar dene" puts a key here; an initial load that FAILS goes into the
   // ledger below instead, and a successful initial load stays silent. An aborted
@@ -276,14 +323,25 @@ export function FollowFeed() {
     const next: Record<string, SeenBaseline> = {};
     for (const f of follows) {
       const key = followKey(f);
-      next[key] = seenSnapshot[key] ?? {
-        seenAt: f.seenAt,
-        seenIds: f.seenIds,
-        seenFloor: f.seenFloor,
-      };
+      next[key] = seenSnapshot[key] ?? followBaseline(f);
     }
     setSeenSnapshot(next);
   }
+
+  // Re-runs whenever Activity shows the page again (and on mount, when the log is
+  // still empty). Declared BEFORE the fetch effect on purpose: effects run in
+  // declaration order, so the keys taken out here are todo for the fetch effect
+  // of the same reveal. Only refs are touched (a state update in an effect body
+  // is a lint error); the stale list stays on screen until the new one lands.
+  useEffect(() => {
+    for (const key of followKeysDueOnReentry(settledAt.current, Date.now())) {
+      loadedKeys.current.delete(key);
+      erroredKeys.current.delete(key);
+      shownRows.current.delete(key);
+      settledAt.current.delete(key);
+      refreshing.current.add(key);
+    }
+  }, []);
 
   useEffect(() => {
     // Rebuilt from the signature (not from the render's `follows`) so the
@@ -301,6 +359,12 @@ export function FollowFeed() {
     }
     for (const key of [...shownRows.current.keys()]) {
       if (!live.has(key)) shownRows.current.delete(key);
+    }
+    for (const key of [...settledAt.current.keys()]) {
+      if (!live.has(key)) settledAt.current.delete(key);
+    }
+    for (const key of [...refreshing.current]) {
+      if (!live.has(key)) refreshing.current.delete(key);
     }
     unannouncedFailures.current.prune(live);
 
@@ -338,13 +402,40 @@ export function FollowFeed() {
       await runWithConcurrency(todo, FETCH_CONCURRENCY, async (item) => {
         const outcome = await fetchFollowState(item, controller.signal);
         if (controller.signal.aborted) return;
-        // This visit's baseline for the follow, the one its section renders with.
-        const baseline = seenSnapshotRef.current[item.key] ?? NO_BASELINE;
+        settledAt.current.set(item.key, { at: Date.now(), ok: outcome.status === "ok" });
+        // The baseline the section renders with: this visit's snapshot, or, for a
+        // follow fetched again on re-entry, what its previous visit stored.
+        const refreshed = refreshing.current.has(item.key);
+        // First visit after a follow (h201-follows-1): the stored stamp is still
+        // addFollow's DEVICE one, which is not comparable with a story's server
+        // time. The response's Date header measures the device clock's skew right
+        // now, so addedAt is moved onto the server's timeline and the stories
+        // listed since the follow keep their "yeni" badge. No readable Date header:
+        // no baseline, as before. A refreshed follow keeps what its last visit stored.
+        const stored =
+          outcome.status === "ok" && !refreshed
+            ? followsStore.read().find((f) => followKey(f) === item.key)
+            : undefined;
+        const anchored =
+          outcome.status === "ok" && stored !== undefined && isDeviceStampOnly(stored)
+            ? followBaseline(stored, { serverNowIso: outcome.serverNow, deviceNowMs: Date.now() })
+            : null;
+        const baseline =
+          anchored ??
+          (refreshed
+            ? followBaselineOf(followsStore.read(), item.key)
+            : (seenSnapshotRef.current[item.key] ?? NO_BASELINE));
         if (outcome.status === "ok") {
           loadedKeys.current.add(item.key);
           erroredKeys.current.delete(item.key);
-          shownRows.current.set(item.key, rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW));
+          shownRows.current.set(item.key, rowsShown(outcome.items, baseline, ROWS_PER_FOLLOW, outcome.serverNow));
+          if (refreshed) refreshing.current.delete(item.key);
+          if (refreshed || anchored !== null) {
+            // The new list and its baseline replace the old pair in one batch.
+            setSeenSnapshot((prev) => ({ ...prev, [item.key]: baseline }));
+          }
         } else {
+          // A failed refresh keeps its flag: the reader's retry takes the fresh baseline.
           erroredKeys.current.add(item.key);
         }
         setResults((prev) => ({ ...prev, [item.key]: outcome }));
@@ -368,7 +459,7 @@ export function FollowFeed() {
         const rows = shownRows.current.get(w.key);
         if (loadedKeys.current.has(w.key) && rows !== undefined) shown.set(w.key, rows);
       }
-      followsStore.markSeen(shown, new Date().toISOString());
+      followsStore.markSeen(shown);
     })();
 
     return () => controller.abort();
@@ -392,7 +483,12 @@ export function FollowFeed() {
 
   function handleRemove(follow: Follow) {
     const key = followKey(follow);
-    pendingFocus.current = focusTargetAfterRemove(follows.map(followKey), key);
+    // Planned from the store as it is now, not from this render's list: a tap on
+    // a follow that is already gone, or one that slid into the slot of the follow
+    // just removed (a double tap), does nothing (h201-follows-3).
+    const plan = planFollowRemoval(followsStore.read().map(followKey), key, removeGuard.current, nowMs());
+    if (plan === null) return;
+    pendingFocus.current = plan.focus;
     setAnnouncement(`${followLabel(follow)} takibi bırakıldı`);
     remove(key);
   }

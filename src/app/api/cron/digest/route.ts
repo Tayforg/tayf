@@ -185,6 +185,8 @@ function toClusterItem(
   bundle: {
     cluster: { id: string; title_tr: string; bias_distribution: DigestClusterItem["biasDistribution"] };
     articles: unknown[];
+    isWireRedistribution?: boolean;
+    effectiveArticleCount?: number;
   },
   attribution: SummaryAttribution | null,
 ): DigestClusterItem {
@@ -194,6 +196,11 @@ function toClusterItem(
     ...summaryFields(attribution),
     articleCount: bundle.articles.length,
     biasDistribution: bundle.cluster.bias_distribution,
+    // h203-wire-callers: the bundle's own wire signal (the cluster page's), so
+    // the mail counts a wire redistribution in distinct texts like every other
+    // surface. Both are already on the bundle: no extra read.
+    isWireRedistribution: bundle.isWireRedistribution,
+    effectiveArticleCount: bundle.effectiveArticleCount,
   };
 }
 

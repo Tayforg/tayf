@@ -70,6 +70,17 @@
 // so each stem is a whole word: no spelling is over-cut, the 166 over-stem guard set is
 // empty for them, and the `or` expansion does not switch a guard off for these queries.
 // Each future pair still needs its own check against the live archive.
+//
+// KALIBAF / GALIBAF (h206-search-2). Iran's parliament speaker is the same split: the live pages for 'Kalibaf'
+// and 'Galibaf' each said 'en ilgili 24 sonuç' and shared 0 of 24 ids (2026-11-21). Live counts over the clusters
+// first published in the last 60 days (word start on the folded title, neutral title and summary): kalibaf 26 /
+// galibaf 4 / both 1, so a reader who typed 'Galibaf' missed about 25 of the 29 recent stories and one who typed
+// 'Kalibaf' missed 3 (the all-time counts the hunter read were 108 / 26 / 5). ts_lexize('turkish_stem') leaves
+// kalibaf, galibaf and kalibafın whole (kalibafın = kalibaf), so, as for Erakçi / Arakçi, both stems are whole
+// words: no spelling is over-cut and the 166 over-stem guard set is empty for them. The group is symmetric and
+// keeps the cost bound (one alias, two disjuncts). 'ghalibaf' stays out on purpose, as 'zelensky' does: a third
+// form would be a third disjunct. A suffixed form typed without an apostrophe ('kalibafın') is not expanded,
+// as 'erakcinin' is not; the canonical query already cuts "Kalibaf'ın" to 'kalibaf'.
 
 import { MAX_SEARCH_TERMS, foldTr } from "./turkish-query";
 
@@ -88,6 +99,7 @@ export const SEARCH_ALIAS_GROUPS: readonly AliasGroup[] = [
   [["akp"], ["ak", "parti"]],
   [["erakci"], ["arakci"]],
   [["zelenskiy"], ["zelenski"]],
+  [["kalibaf"], ["galibaf"]],
 ];
 
 /** A short spelling that also searches the official one, never the other way round. */

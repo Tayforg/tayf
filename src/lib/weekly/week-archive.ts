@@ -1,8 +1,10 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { BIAS_TO_ZONE, zoneOf } from "@/lib/bias/config";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/db/paging";
 import { createReaderClient } from "@/lib/supabase/server";
+import type { DarkZoneGroup } from "@/lib/trends/dark-sources";
 import {
   DAY_MS,
   ISTANBUL_OFFSET_MS,
@@ -16,6 +18,7 @@ import {
   type WeeklyClusterRead,
   type WeeklyClusterRow,
 } from "@/lib/weekly/weekly-query";
+import type { BiasCategory, MediaDnaZone } from "@/types";
 
 // /hafta/[hafta] — ISO-week permalinks for the trailing-7-day "Medya Hava
 // Durumu" (P-07). /hafta itself stays a rolling trailing-7-day page with
@@ -219,6 +222,120 @@ export async function getWeekArchiveClusters(
   // Pure: no Supabase, no clock, no cache entry for a key that can never match.
   if (weekRange(key) === null) return null;
   return getWeekArchiveClustersCached(key);
+}
+
+// ---------------------------------------------------------------------------
+// Silent voting sources of one closed week (h207-weekly-1).
+//
+// The zone shares of /hafta/<week> are divided by that week's own source records,
+// so a voting outlet whose feed delivered nothing that week moves them without any
+// editorial change (five outlets were dark from 15-25 Oct 2026, and /trends says
+// so since h90-trends-2). Migration 219's `week_silent_voting_sources` lists the
+// active voting sources (kind outlet or wire) with no article published in the
+// week although they published materially in the 28 days around it; the page names
+// them under the note and says the shares are not comparable with those weeks
+// (week-copy.ts `silentSourcesCaveat`).
+//
+// Same layering as the cluster read above: an uncached fetcher that never throws
+// (its `null` is the failure signal), a cached wrapper that picks its lifetime
+// AFTER the outcome with one literal `cacheLife` per invocation, and an exported
+// function that answers an unparseable key before the cache. The window lives in
+// SQL (it is bounded by the database's own `now()`), so no clock is read here.
+// ---------------------------------------------------------------------------
+
+const SILENT_ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
+
+/**
+ * The RPC's rows as zone groups in SILENT_ZONES order, names sorted with the
+ * Turkish collation, zones without a name omitted (DarkZoneGroup, the /trends
+ * shape). `null` when the answer is not a list. A row without a usable name or with
+ * a bias outside the contract is skipped: it cannot be placed in a zone, and one odd
+ * row must not blank the sentence for the rest.
+ */
+function groupSilentSources(data: unknown): DarkZoneGroup[] | null {
+  if (!Array.isArray(data)) return null;
+
+  const byZone = new Map<MediaDnaZone, string[]>();
+  for (const row of data as unknown[]) {
+    if (row === null || typeof row !== "object") continue;
+    const { name, bias } = row as { name?: unknown; bias?: unknown };
+    if (typeof name !== "string" || name === "" || typeof bias !== "string") continue;
+    if (!Object.prototype.hasOwnProperty.call(BIAS_TO_ZONE, bias)) continue;
+    const zone = zoneOf(bias as BiasCategory);
+    const names = byZone.get(zone);
+    if (names === undefined) byZone.set(zone, [name]);
+    else names.push(name);
+  }
+
+  const groups: DarkZoneGroup[] = [];
+  for (const zone of SILENT_ZONES) {
+    const names = byZone.get(zone);
+    if (names === undefined || names.length === 0) continue;
+    groups.push({ zone, names: [...names].sort((a, b) => a.localeCompare(b, "tr")) });
+  }
+  return groups;
+}
+
+/** One call of the RPC for the week's bounds, on the capped reader client (4 s).
+ * `null` = could not be read: a Supabase error, a timeout, a throw, an answer that
+ * is not a list, or migration 219 not applied yet (PostgREST `PGRST202`, which is
+ * the expected state until the founder applies it and is not logged). Never throws. */
+async function fetchWeekSilentSources(range: {
+  startIso: string;
+  endIso: string;
+}): Promise<DarkZoneGroup[] | null> {
+  try {
+    const supabase = createReaderClient();
+    const { data, error } = await supabase.rpc("week_silent_voting_sources", {
+      p_from: range.startIso,
+      p_to: range.endIso,
+    });
+    if (error) {
+      if (error.code !== "PGRST202") {
+        console.error(`[week-archive] silent sources unavailable: ${error.message}`);
+      }
+      return null;
+    }
+    const groups = groupSilentSources(data);
+    if (groups === null) console.error("[week-archive] silent sources unavailable: unexpected rows");
+    return groups;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[week-archive] silent sources unavailable: ${message}`);
+    return null;
+  }
+}
+
+// `sources` is the registry tag every source mutation revalidates, so deactivating
+// or editing a source refreshes its mention. A read (including "nobody was silent")
+// keeps `hours`; a failed read, or 219 not applied yet, is memoised for `minutes`
+// only, so the sentence appears within minutes of applying 219.
+async function getWeekSilentVotingSourcesCached(
+  key: string,
+): Promise<DarkZoneGroup[] | null> {
+  "use cache";
+  cacheTag("sources");
+
+  const range = weekRange(key);
+  const data = range ? await fetchWeekSilentSources(range) : null;
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (data === null) cacheLife("minutes");
+  else cacheLife("hours");
+  return data;
+}
+
+/** The voting sources that delivered nothing in one closed week although they
+ * delivered materially around it, grouped by zone (iktidar, bagimsiz, muhalefet),
+ * names sorted with the Turkish collation, empty zones omitted. `null` = could not
+ * be read, the key is not a valid ISO week, or migration 219 is not applied yet;
+ * `[]` = read fine, nobody was silent. Never throws. Closed weeks only: the caller
+ * must not ask for the week in progress, whose feeds are being read right now. */
+export async function getWeekSilentVotingSources(
+  key: string,
+): Promise<DarkZoneGroup[] | null> {
+  // Pure: no Supabase, no cache entry for a key that can never match.
+  if (weekRange(key) === null) return null;
+  return getWeekSilentVotingSourcesCached(key);
 }
 
 export interface RecentWeekKeys {

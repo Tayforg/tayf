@@ -24,7 +24,8 @@ import { siteUrl } from "@/lib/site-url";
 //
 // Every response -- including errors and the 405 refusals -- is JSON with
 // `Access-Control-Allow-Origin: *` so a browser-side consumer can read the
-// failure too. Status order: 501 (format) -> 400 (url missing) -> 404 (url
+// failure too. `format` may be missing, blank or any-case `json`; every other
+// value is the 501. Status order: 501 (format) -> 400 (url missing) -> 404 (url
 // not ours) -> 503 (read failed) -> 404 (no such cluster) -> 200.
 
 const JSON_HEADERS = {
@@ -68,8 +69,10 @@ export const DELETE = refuse;
 export async function GET(req: Request): Promise<Response> {
   const params = new URL(req.url).searchParams;
 
-  const format = params.get("format");
-  if (format !== null && format !== "json") {
+  // oEmbed 1.0 s2.2: `format` is optional, so a missing or blank value means
+  // json, and consumers differ on case (`JSON`). Anything else keeps the 501.
+  const format = (params.get("format") ?? "").trim().toLowerCase();
+  if (format !== "" && format !== "json") {
     return json({ error: "Only format=json is supported" }, 501, CACHE_NEGATIVE);
   }
 

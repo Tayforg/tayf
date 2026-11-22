@@ -388,6 +388,58 @@ function stemsOfText(text: string): Set<string> {
 }
 
 /**
+ * Distinct evidence behind a match: how many independent pieces of evidence the
+ * matched stems amount to. A name span counts once, and only if it claims a
+ * matched stem no earlier span claimed (overlapping spans of one person
+ * ("Hakan Fidan" ... "Hakan Fidan'ın") share stems, and a span that adds no
+ * matched stem of its own is the same evidence again). Every matched stem
+ * outside any span counts once unless it is a generic claim verb
+ * (GENERIC_CLAIM_VERB_STEMS). Pure, and independent of the cluster text: it
+ * only needs the title's name spans and the matched stems, so the cron's
+ * scorer (`scoreCluster`) and the reader's check on STORED matched_terms
+ * (`legacyLinkPassesV2`) share one rule and cannot drift apart.
+ */
+export function distinctEvidenceCount(
+  nameSpans: readonly (readonly string[])[],
+  matched: readonly string[],
+): number {
+  const matchedSet = new Set(matched);
+  const spanStems = new Set<string>();
+  // Matched stems an earlier span already accounts for.
+  const claimed = new Set<string>();
+  let distinct = 0;
+  for (const span of nameSpans) {
+    for (const stem of span) spanStems.add(stem);
+    const hits = span.filter((stem) => matchedSet.has(stem));
+    if (hits.some((stem) => !claimed.has(stem))) distinct++;
+    for (const stem of hits) claimed.add(stem);
+  }
+  for (const stem of matched) {
+    if (!spanStems.has(stem) && !GENERIC_CLAIM_VERB_STEMS.has(stem)) distinct++;
+  }
+  return distinct;
+}
+
+/**
+ * Would keyword-v2's publish gate still accept a link keyword-v1 published?
+ * Read-time check for legacy `method = 'keyword-v1'` auto rows (h206-story-1,
+ * docs/fact-checks.md): re-derives the fact-check title's name spans and counts
+ * distinct evidence over the STORED `matched_terms`, so it needs no cluster
+ * text. The v1 `matched.length >= MIN_MATCHED_TERMS`, entity and score parts of
+ * the gate were already met when the row was published, so only the distinct
+ * term minimum is re-applied.
+ */
+export function legacyLinkPassesV2(
+  factCheckTitle: string,
+  storedMatched: readonly string[],
+): boolean {
+  return (
+    distinctEvidenceCount(extractFactCheckTerms(factCheckTitle).nameSpans, storedMatched) >=
+    MIN_MATCHED_TERMS
+  );
+}
+
+/**
  * Score one cluster against a fact-check's extracted terms.
  *
  * Support rule: a stem only counts as "matched" if the cluster itself
@@ -435,22 +487,7 @@ export function scoreCluster(t: FactCheckTerms, doc: ClusterDoc): MatchResult {
 
   const score = totalWeight > 0 ? Math.round((matchedWeight / totalWeight) * 1000) / 1000 : 0;
 
-  const matchedSet = new Set(matched);
-  const spanStems = new Set<string>();
-  // Matched stems an earlier span already accounts for. Overlapping spans of
-  // one person ("Hakan Fidan" ... "Hakan Fidan'ın") share stems, and a span
-  // that adds no matched stem of its own is the same evidence again.
-  const claimed = new Set<string>();
-  let distinctTerms = 0;
-  for (const span of t.nameSpans) {
-    for (const stem of span) spanStems.add(stem);
-    const hits = span.filter((stem) => matchedSet.has(stem));
-    if (hits.some((stem) => !claimed.has(stem))) distinctTerms++;
-    for (const stem of hits) claimed.add(stem);
-  }
-  for (const stem of matched) {
-    if (!spanStems.has(stem) && !GENERIC_CLAIM_VERB_STEMS.has(stem)) distinctTerms++;
-  }
+  const distinctTerms = distinctEvidenceCount(t.nameSpans, matched);
 
   let decision: MatchResult["decision"] = "none";
   if (

@@ -1,4 +1,6 @@
+import { ZONE_META } from "@/lib/bias/config";
 import { formatCountTr } from "@/lib/format/number-tr";
+import type { DarkZoneGroup } from "@/lib/trends/dark-sources";
 import { isBlindspotVetoCovered } from "@/lib/weekly/week-key";
 import type { MediaDnaZone } from "@/types";
 
@@ -190,6 +192,44 @@ export function weekCopy(closed: boolean): WeekCopy {
  */
 export function weekCoverageCaveat(copy: WeekCopy, weekKey: string): string | null {
   return isBlindspotVetoCovered(weekKey) ? null : copy.vetoCoverageCaveat;
+}
+
+/**
+ * The feed-set caveat to print on a CLOSED /hafta/<weekKey>, or `null` for none
+ * (h207-weekly-1). `groups` are the voting sources that delivered nothing that
+ * week although they delivered materially in the weeks around it, grouped by
+ * zone (`getWeekSilentVotingSources`, migration 219). Zone shares are divided by
+ * the week's own source records, so a source that was silent that week moves them
+ * without any editorial change; the sentence says so, in the wording /trends uses
+ * for the same effect (h90-trends-2), and names no week or date.
+ *
+ *   "O hafta 3 spektrum kaynağı hiç veri vermedi (İktidar: A; Muhalefet: B, C).
+ *    Bu kaynaklar yakın haftalarda düzenli haber veriyordu; bölge payları bu
+ *    yüzden o haftalarla birebir karşılaştırılamaz."
+ *
+ * A single source reads "O hafta 1 spektrum kaynağı hiç veri vermedi (Bağımsız: A).
+ * Bu kaynak yakın haftalarda ..." : "kaynağı" stays after the numeral, and the
+ * back-reference to the one named outlet is the singular "Bu kaynak".
+ *
+ * `null` for `null` (the read failed, or 219 is not applied yet), for an empty
+ * list and for groups without a name. It reads "O hafta", never "Bu hafta": it is
+ * a closed-week string (week-copy.test.ts bans "bu hafta" in every closed string),
+ * which is also why the page asks for it only on a closed week. Groups print in the
+ * order given; the reader already sorts them (iktidar, bagimsiz, muhalefet).
+ */
+export function silentSourcesCaveat(
+  groups: readonly DarkZoneGroup[] | null,
+): string | null {
+  if (!groups) return null;
+  const named = groups.filter((g) => g.names.length > 0);
+  const count = named.reduce((acc, g) => acc + g.names.length, 0);
+  if (count === 0) return null;
+
+  const list = named
+    .map((g) => `${ZONE_META[g.zone].label}: ${g.names.join(", ")}`)
+    .join("; ");
+  const subject = count === 1 ? "Bu kaynak" : "Bu kaynaklar";
+  return `O hafta ${formatCountTr(count)} spektrum kaynağı hiç veri vermedi (${list}). ${subject} yakın haftalarda düzenli haber veriyordu; bölge payları bu yüzden o haftalarla birebir karşılaştırılamaz.`;
 }
 
 /** A non-negative whole count; NaN, Infinity and negatives read as 0. */

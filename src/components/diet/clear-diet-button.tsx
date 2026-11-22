@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type Ref } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type Ref } from "react";
 
 import { clearDiet } from "@/lib/diet/diet-store";
 import { useReadingDiet } from "./use-reading-diet";
@@ -138,6 +138,17 @@ export function ClearDietButton() {
     else if (target === "cancel") cancelRef.current?.focus();
     else if (target === "status" || target === "alert") messageRef.current?.focus();
   }, [step]);
+
+  // Next 16 (cacheComponents) keeps /diyetim mounted in a hidden <Activity> when
+  // the reader navigates away, and a hide runs layout-effect cleanups. Without
+  // this reset an armed 'Evet, sil' (or a stale 'silindi', with no 'Verilerimi
+  // sil' button) would be waiting when the page is shown again. prevStep goes
+  // back too: otherwise the [step] effect sees confirm -> idle on the reveal,
+  // focusTargetFor answers 'trigger', and focus jumps as the page appears.
+  useLayoutEffect(() => () => {
+    prevStep.current = "idle";
+    setStep("idle");
+  }, []);
 
   if (!available) return null;
 

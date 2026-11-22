@@ -325,6 +325,30 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
     excludes: ["imamoglu ilce", "tugberk imamoglu"],
     notAfter: ["adana", "tugberk"],
   },
+  // The politicians, not the other Babacans and Demirtaşes (h205-gundem-1, replay 2026-11-21, read-only). The bare
+  // surname lists Nuray Babacan (a columnist), Abdurrahman Babacan (an AK Parti MP) and Meral Babacan, and /gundem/demirtas
+  // held one cluster, 96ad1204, about Kaymakam İsmail Demirtaş (a district governor), so the hub was not about Selahattin
+  // Demirtaş at all. Every one of these stories repeats the bare surname in its lead ("Babacan, 'Bir iddiaya göre ...'",
+  // "Demirtaş, firma yetkilisinden bilgi aldı"), so a per-occurrence notAfter guard cannot tell it apart: the erdogan design
+  // (emine / bilal) instead, a story-level veto plus the politician's full name trusted. `excludes` veto the whole story
+  // when another person is named, unless "Ali Babacan" / "Selahattin Demirtaş" is in it too ("Nuray Babacan'ın iddiasına Ali
+  // Babacan'dan yanıt" stays). "Ali Babacan" is also what the DEVA leader's stories print, so it needs no cue of its own.
+  // Hub-only, like erdogan's: GUARDED_KEYS of tests/migrations/163 is tcmb, aym and meclis, so no migration mirrors these
+  // lists and /trends is untouched (`tokens` of both keys do not change).
+  // 365 days of live clusters (article_count >= 2, not archived, not merged), the hub's folded text: babacan 91 -> 84,
+  // 7 dropped (f4e61acd, 02a78080, 838f43de, 472b40a5, f9b3e901, 97d210af, 9d679682: all Nuray, Abdurrahman or Meral
+  // Babacan); demirtas 93 -> 91, 2 dropped (a9c146eb "Ekonomist Özgür Demirtaş" and 96ad1204); no other row. 14 days:
+  // demirtas 1 -> 0, babacan 26 -> 23 (97d210af, 9d679682 and 02a78080 gone).
+  babacan: {
+    aliases: ["Babacan", "Ali Babacan"],
+    trusted: ["Ali Babacan"],
+    excludes: ["nuray babacan", "abdurrahman babacan", "meral babacan"],
+  },
+  demirtas: {
+    aliases: ["Demirtaş", "Selahattin Demirtaş"],
+    trusted: ["Selahattin Demirtaş"],
+    excludes: ["ismail demirtas", "kaymakam demirtas", "ozgur demirtas"],
+  },
   dem: { inflections: ["DEM Partili"] },
   "iyi-parti": { inflections: ["İYİ Partili"] },
   yrp: { aliases: ["Yeniden Refah", "YRP"] },
@@ -363,6 +387,13 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
     // "parti meclisi" is exact on purpose: "parti meclis" would also veto "DEM Parti Meclis Grubu", a TBMM
     // group. No bare "almanya": a TBMM delegation story that mentions Berlin is still the parliament. They are
     // hub-only (see hubExcludes): `excludes` above is what migration 163 mirrors for /trends.
+    // h205-gundem-4 (replay 2026-11-21, read-only): three more foreign parliaments pass on the 'milletvekil' cue and
+    // are the phrases "<country> meclis", never the bare country: "sirbistan meclis" (7039919c, "Adem Mavrić, Sırbistan
+    // Meclisi başkanvekili seçildi", which sat on page 1), "kosova meclis" (268911e0, the Kosovo president's election) and
+    // "yunanistan meclis" (9dca0e37, the Greek parliament's disciplinary committee). A 365-day replay of the hub's pattern
+    // filtered to "<country> meclis" finds five rows: these three, and c1f1b10d and 2b543a88, TBMM Speaker Kurtulmuş meeting
+    // the North Macedonian and Georgian speakers. Those two carry the trusted "TBMM" and so no hub-only veto can drop them
+    // (they stay on purpose); the other three drop. 14 days: 1 fewer (7039919c). `excludes` is unchanged (163 parity).
     hubExcludes: [
       "parti meclisi",
       "kktc",
@@ -375,6 +406,9 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "kadin meclis",
       "baris anneleri",
       "isig meclis",
+      "sirbistan meclis",
+      "kosova meclis",
+      "yunanistan meclis",
     ],
     // The bare "Meclis" counts only beside a TBMM or Turkish-politics cue. "meclis baskan" was a cue until
     // h96-entityhubs-2: it is the matched phrase's own neighbour ("KKTC Meclis Başkanı", "Gaziantep Ticaret
@@ -415,6 +449,16 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
   // "doviz", "para politika") each let in about as many Turkish stories as foreign ones and stay;
   // "tbmm" and "repo" were added because they bring back three Turkish stories (a TBMM agenda item with
   // the bank's presentation, the 2027 budget week, the liquidity measures) and no foreign one.
+  // h205-gundem-3 (replay 2026-11-21, read-only): "banknot", "tedavul" and "kavcioglu" are three more cues. The hub
+  // listed one card (cc21e463, through the trusted TCMB) and missed the week's banknote stories of the Turkish bank, which name
+  // it but none of the monetary words: 24c9ec02 (Ali Babacan on "tedavüldeki üç banknot", 4 sources), 722984ff ("banknotlar
+  // toplatılsın", 5 sources) and 640f920f (the fourth bureaucrat whose signature is on the notes, former governor Kavcıoğlu). A
+  // 365-day replay of the three cues (old patterns against new, the hub's folded text), over live clusters (article_count >= 2,
+  // not archived, not merged), admits exactly these three rows and drops none; 14 days 1 -> 4. "banknot" and "tedavul" are not
+  // Turkey-only, any more than "faiz" is: an unlisted foreign bank's banknote story passes. The data has one example outside the
+  // live set, e31ee65f (Kanada Merkez Bankası's new 20-dollar note, 1 article, archived). That leak is accepted, the same way
+  // "faiz" already admits a foreign rate story, and entity-hub.test.ts pins it. `excludes` is unchanged (no hubExcludes added),
+  // so migration 163 (which mirrors it) is untouched.
   tcmb: {
     aliases: ["Merkez Bankası", "TCMB"],
     trusted: ["TCMB"],
@@ -445,6 +489,9 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "piyasa katilimci",
       "tbmm",
       "repo",
+      "banknot",
+      "tedavul",
+      "kavcioglu",
     ],
   },
   zelenski: { aliases: ["Zelenski", "Zelenskiy", "Zelensky", "Zelenskyy"] },
@@ -491,10 +538,20 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
   // the 200-lira note, the Dolar/TL report and c9e1b994, a Hatay burglary that says "dolar" in its headline (an accepted
   // leftover: no cue separates it from a Turkish dollar story). 3 is the indexable floor; below it the hub is noindex by
   // the existing thin-hub rule.
+  // h205-gundem-2 (replay 2026-11-21, read-only): the open 'dolar' prefix also reads two forms of the verb dolmak,
+  // "dolarsa" ("süre dolarsa", 3e07bd69, the Kleopatra Koyu illegal-building story) and "dolarken" ("sular okul bahçesine
+  // dolarken", 9a4507ab). By then the hub's only cluster was 3e07bd69 and the story page showed a "Dolar" chip. The 120-day
+  // tally of word forms after 'dolar': dolar 334, dolara 132, dolarlık 94, doları 60, doların 25, dolardan 11, dolarla 10,
+  // dolarken 2 (one verb), dolarsa 1. Both verbs are vetoed as hub-only phrases, open-ended like every cue over 3 letters
+  // ('dolarsa' also catches "dolarsa,"). 365 days: 37 -> 35, exactly those two dropped, no real dollar story lost; 14 days:
+  // 1 -> 0, so the hub falls to 0 clusters, below the existing indexable floor of 3 (noindex by the thin-hub rule).
+  // Not chosen: a per-occurrence suffix lookahead after 'dolar'. It needs a new spec field and builder code and
+  // breaks the `pattern.endsWith(QUANTITY_GUARD + 'dolar')` parity check of tests/migrations/163, while this data-only veto
+  // drops nothing else. Hub-only: /trends reads the unguarded token 'dolar' (plus 163's amount guard) and is untouched.
   dolar: {
     hubMatch: "prefix",
     quantityGuard: true,
-    hubExcludes: ["ara secim", "fed", "irak", "cin"],
+    hubExcludes: ["ara secim", "fed", "irak", "cin", "dolarsa", "dolarken"],
   },
   // The Turkish ministry only: "Dışişleri" right after a foreign country word
   // ("ABD Dışişleri Bakanı Rubio", "İran Dışişleri Sözcüsü") is that country's.

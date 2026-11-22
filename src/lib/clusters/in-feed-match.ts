@@ -34,6 +34,15 @@
 //   - aliases:      "AKP" also finds "AK Parti ..." and the reverse
 //                   (search-aliases.ts), exactly when the archive expands the
 //                   same query, so the cards and the archive section agree.
+//   - doubled root: "af" also finds "affı" and "affın" (h206-search-1). The archive
+//                   searches the doubled form of a typed af / zam (turkish-query.ts, rule B'):
+//                   'affı' and 'affın' (whose stem 'aff' also reaches affına, affını, affımız).
+//                   "zam" prefix-matches its own already, but "af" is two letters, so it needs
+//                   "aff" + a Turkish suffix tail. The card filter is deliberately a little
+//                   more lenient than the archive ("affa" passes, as "zam" passes "zamlar" by the
+//                   3-letter prefix rule) and a little narrower on "affına" / "affını", which only
+//                   the archive lists. "Afrika", "Afyon" and "Affedilmez" still do not match. "sır"
+//                   is not a doubled root: "sırrı" is also the given name Sırrı (db-LOW-1).
 //
 // Diacritics are folded the same way as the archive RPC's tayf_search_fold
 // (migration 129; foldTr is its TypeScript twin), so ASCII "erdogan" finds
@@ -45,6 +54,7 @@ import type { SearchSort } from "@/lib/search/search-sort";
 import { rankWord } from "@/lib/search/search-status";
 import { aliasTermForms, expandAliasQuery } from "./search-aliases";
 import {
+  GEMINATE_DOUBLED_FORMS,
   SLASH_BETWEEN_LETTERS,
   canonicalSearchQuery,
   cleanQueryUnicode,
@@ -262,15 +272,34 @@ function hasWholeWordOccurrence(haystack: string, needle: string): boolean {
   }
 }
 
+// h206-search-1: the doubled form of a two-letter root of GEMINATE_DOUBLED_FORMS ('af' -> 'affı', 'affın'). The archive
+// searches 'affı' and 'affın' (stem 'aff': affın, affına, affını, affımız) for a typed af, and 'zammı' / 'zammın' for zam,
+// but a two-letter token is a whole word or root + suffix, and 'affı' is neither. Like the 3-letter prefix rule for 'zam', this
+// check is deliberately a little more lenient than the archive ('affa' passes) and does not take 'affına' / 'affını'.
+// True when the token is such a root and some word of `haystack` starts with the root plus its last letter doubled ('aff')
+// and then carries a Turkish suffix tail ('i' of affı, 'in' of affın). The tail must be there: a bare 'aff' and
+// 'Affedilmez' are not the root's inflections. Folded keys, one indexOf step per occurrence.
+function hasDoubledRootOccurrence(haystack: string, needle: string): boolean {
+  if (!GEMINATE_DOUBLED_FORMS.has(needle)) return false;
+  const stem = needle + needle.slice(-1);
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(stem, from);
+    if (at === -1) return false;
+    if (atWordStart(haystack, at) && suffixTailFollows(haystack, at + stem.length)) return true;
+    from = at + 1;
+  }
+}
+
 /**
  * True when every token starts a word of `title`; a token of exactly
  * MIN_TOKEN_LENGTH (2) characters must be a whole word or a Turkish root plus a
  * suffix instead (h116-search-3: 'ab' is the EU, not ABD or Abiy, while 'oy' still
  * finds "oyları" and 'ak' finds "Akın", because the archive's Turkish stemmer
- * reduces those forms to the two-letter root). An empty token list never matches (a
- * query that reduces to nothing, e.g. "-ak", shows no in-feed cards rather than the
- * whole feed). Tokens come from `searchTokens` but are re-keyed here, so passing raw
- * lowercase words works too.
+ * reduces those forms to the two-letter root; 'af' also takes its doubled form 'affı' / 'affın', h206-search-1).
+ * An empty token list never matches (a query that reduces to nothing, e.g. "-ak", shows no in-feed
+ * cards rather than the whole feed). Tokens come from `searchTokens` but are re-keyed here, so
+ * passing raw lowercase words works too.
  */
 export function titleMatchesTokens(
   title: string,
@@ -282,7 +311,7 @@ export function titleMatchesTokens(
     const needle = matchKey(token);
     if (needle === "") return false;
     return needle.length === MIN_TOKEN_LENGTH
-      ? hasWholeWordOccurrence(key, needle)
+      ? hasWholeWordOccurrence(key, needle) || hasDoubledRootOccurrence(key, needle)
       : hasWordStartOccurrence(key, needle);
   });
 }

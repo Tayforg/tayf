@@ -103,7 +103,8 @@ export function formatZoneLine(counts: Record<MediaDnaZone, number>): string {
  * synthetic tally can exceed the member list): the bare count is kept. The
  * share surfaces (embed, rozet, OG pill) print a wire redistribution's head
  * through `wireSourceCountHead`, which names the votes in that case; so does the
- * /takip route (h196-counts-2).
+ * /takip route (h196-counts-2), and so do the RSS topic feed, the blindspots
+ * feed, the social composer and the digest template (h203-wire-callers).
  */
 export function sourceCountHead(
   total: number,
@@ -126,8 +127,16 @@ export function sourceCountHead(
  * form 'N kaynak · M sınıflandırılmış'. That form is exactly as long as the
  * parenthesised one ('3 kaynak (2 sınıflandırılmış)'), so the embed's layout
  * budget holds. Every other case is `sourceCountHead`'s, byte for byte: a
- * non-wire cluster keeps its stale-tally rule, and so do the RSS, social,
- * digest, blindspots-feed, card and weekly callers, which do not use this
+ * non-wire cluster keeps its stale-tally rule.
+ *
+ * The RSS topic feed (src/app/rss/[topic]/route.ts), the blindspots feed
+ * (src/lib/feeds/blindspots-feed.ts), the social composer
+ * (src/lib/social/compose.ts, `countHeadOf`) and the digest template
+ * (src/lib/digest/template.ts, `storyCountLine`) also call it, with
+ * `isWire = true`, for a wire redistribution with a positive
+ * `effectiveArticleCount`, and follow it with the `wireBadgeLabel` cue. A
+ * non-wire cluster in those callers keeps `sourceCountHead`, and so does the
+ * cluster card (src/components/story/cluster-card.tsx), which does not use this
  * helper.
  */
 export function wireSourceCountHead(

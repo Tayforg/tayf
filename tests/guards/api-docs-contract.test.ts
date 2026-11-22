@@ -4,7 +4,13 @@ import { resolve } from "node:path";
 import { buildOpenApiDocument } from "@/lib/api/openapi";
 import { apiError, UPSTREAM_UNAVAILABLE_STATUSES } from "@/lib/api/errors";
 import { registryEnvelope } from "@/lib/sources/registry";
-import { formatZoneLine } from "@/lib/feeds/zone-line";
+import { formatZoneLine, wireSourceCountHead } from "@/lib/feeds/zone-line";
+import {
+  detectWireRedistribution,
+  WIRE_MIN_MEMBERS,
+  WIRE_UNIQUE_HASH_RATIO,
+  wireBadgeLabel,
+} from "@/lib/clusters/wire";
 
 // ---------------------------------------------------------------------------
 // Permanent CI guard (hunt 33, h33-api-1 / h33-api-2 / h33-api-3): docs/api.md
@@ -18,6 +24,9 @@ import { formatZoneLine } from "@/lib/feeds/zone-line";
 //       says Retry-After and no-store, next to the 500 row for any other error.
 //   (c) The RSS item-description example is what the feed code prints: zones
 //       joined with " · " by formatZoneLine, every zone printed, zero included.
+//       A wire redistribution prints a longer form (distinct-text count, the
+//       wire note after the zones, five or six " · " parts); the doc must show
+//       it and scope the four-part split to non-wire items (h204-api-1).
 //   (d) The /api/v1 CORS section tells browser callers that a trailing slash is
 //       answered by the platform with a 308 that carries no CORS headers.
 //   (e) The /api/v1/clusters section and the /api/health note do not call
@@ -177,6 +186,88 @@ describe("docs/api.md RSS description example is what the feed prints (h33-api-3
     const zeros = formatZoneLine({ iktidar: 2, bagimsiz: 1, muhalefet: 0 });
     expect(zeros).toBe("İktidar 2 · Bağımsız 1 · Muhalefet 0");
     expect(DOC).toContain("every zone is printed, zero counts included");
+  });
+
+  // h204-api-1: a wire redistribution prints `${wireSourceCountHead} · ${zoneLine}.
+  // ${wireBadgeLabel}.` (src/app/rss/[topic]/route.ts, src/lib/feeds/blindspots-feed.ts).
+  // The badge itself contains " · ", so such an item splits into five or six parts,
+  // not four, and its N counts distinct texts, not members.
+  const docLine = (start: string): string | undefined =>
+    DOC.split("\n").find((l) => l.startsWith(start));
+
+  it("documents the wire form exactly as the feed prints it", () => {
+    const z = { iktidar: 0, bagimsiz: 1, muhalefet: 5 };
+    const wire = `${wireSourceCountHead(3, z, true)} · ${formatZoneLine(z)}. ${wireBadgeLabel(6, 3)}.`;
+    expect(wire).toBe(
+      "3 kaynak · 6 sınıflandırılmış · İktidar 0 · Bağımsız 1 · Muhalefet 5. Ajans ağırlıklı · 6 haber, 3 farklı metin.",
+    );
+    expect(DOC).toContain("`" + wire + "`");
+  });
+
+  it("names the single-text wire cue", () => {
+    expect(wireBadgeLabel(3, 1)).toBe("Tek kaynaktan dağıtıldı · 3 kopya");
+    expect(DOC).toContain("`Tek kaynaktan dağıtıldı · {members} kopya`");
+  });
+
+  it("names the several-texts wire cue", () => {
+    expect(wireBadgeLabel(6, 3)).toBe("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+    expect(DOC).toContain("`Ajans ağırlıklı · {members} haber, {N} farklı metin`");
+  });
+
+  it("scopes the four-part split to non-wire items", () => {
+    expect(DOC).not.toContain("always gets the same parts (four");
+    const line = docLine("Every item has the headline");
+    expect(line, "the item paragraph is found").toBeDefined();
+    expect(line).toContain("not a wire redistribution");
+  });
+
+  it("says a wire item counts distinct texts and is read by zone label", () => {
+    const line = docLine("**Wire redistributions.**");
+    expect(line, "the wire paragraph is found").toBeDefined();
+    expect(line).toContain("distinct texts");
+    expect(line).toContain("{N} kaynak · {M} sınıflandırılmış");
+    expect(line).toContain("by their labels");
+  });
+
+  it("states the wire trigger as the badge rule, not a single-text majority", () => {
+    // The wording below is re-checked if either constant changes.
+    expect(WIRE_UNIQUE_HASH_RATIO).toBe(0.5);
+    expect(WIRE_MIN_MEMBERS).toBe(3);
+    // Two texts held by two members each: no single text is a majority, yet the
+    // cluster is a wire redistribution (distinct texts / members <= 0.5).
+    const members = [
+      { id: "1", content_hash: "A" },
+      { id: "2", content_hash: "A" },
+      { id: "3", content_hash: "B" },
+      { id: "4", content_hash: "B" },
+    ];
+    expect(detectWireRedistribution(members).isWire).toBe(true);
+    const line = docLine("**Wire redistributions.**");
+    expect(line, "the wire paragraph is found").toBeDefined();
+    expect(line).not.toContain("most members repeat one agency text");
+    expect(line).toContain("at least half of the members repeat another member");
+  });
+
+  it("states the wire head by M against N", () => {
+    expect(wireSourceCountHead(3, { iktidar: 0, bagimsiz: 1, muhalefet: 5 }, true)).toBe(
+      "3 kaynak · 6 sınıflandırılmış",
+    );
+    expect(wireSourceCountHead(2, { iktidar: 0, bagimsiz: 1, muhalefet: 1 }, true)).toBe("2 kaynak");
+    expect(wireSourceCountHead(3, { iktidar: 0, bagimsiz: 1, muhalefet: 1 }, true)).toBe(
+      "3 kaynak (2 sınıflandırılmış)",
+    );
+    const line = docLine("**Wire redistributions.**");
+    expect(line, "the wire paragraph is found").toBeDefined();
+    expect(line).toContain("`{N} kaynak · {M} sınıflandırılmış`");
+    expect(line).toContain("the bare `{N} kaynak`");
+    expect(line).toContain("`{N} kaynak ({M} sınıflandırılmış)`");
+    expect(line).not.toContain("otherwise the head follows the rules above");
+  });
+
+  it("the source-count paragraph points a wire item to the wire paragraph", () => {
+    const line = docLine("The source count counts every member of the cluster");
+    expect(line, "the source-count paragraph is found").toBeDefined();
+    expect(line).toContain("a wire redistribution counts its distinct texts instead");
   });
 });
 

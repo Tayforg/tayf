@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  DIET_CLOCK_TICK_MS,
+  DIET_SNAPSHOT_MAX_AGE_MS,
   readDietSnapshot,
   getServerDietSnapshot,
   subscribeDiet,
@@ -7,7 +9,14 @@ import {
   clearDiet,
   pruneStoredDiet,
 } from "./diet-store";
-import { DIET_STORAGE_KEY, DIET_MAX_ENTRIES, pruneDiet, parseDiet, type DietEntry } from "./diet";
+import {
+  DIET_STORAGE_KEY,
+  DIET_MAX_ENTRIES,
+  pruneDiet,
+  parseDiet,
+  summarizeDiet,
+  type DietEntry,
+} from "./diet";
 
 // Minimal fake Storage + window, following the shape vi.stubGlobal needs.
 // `throwOnGetter` simulates the `window.localStorage` PROPERTY ACCESS
@@ -440,5 +449,257 @@ describe("pruneStoredDiet", () => {
     expect(after).not.toBe(before);
     expect(after.entries).toEqual([fresh]);
     expect(storage._store.has(DIET_STORAGE_KEY)).toBe(true);
+  });
+});
+
+// h201-diet-1: the 7- and 30-day windows were anchored to `readAt`, which was only re-stamped when the raw
+// localStorage string changed. A tab (or a preserved /diyetim route) that outlived a click kept counting clicks
+// that had long left the window. The anchor is now refreshed once it is older than DIET_SNAPSHOT_MAX_AGE_MS, and
+// subscribers are nudged on focus / visibility / pageshow / a coarse tick so a long-lived tab re-reads it.
+describe("snapshot clock (h201-diet-1)", () => {
+  const MINUTE = 60 * 1000;
+  const DAY = 24 * 60 * MINUTE;
+  const T0 = Date.UTC(2026, 10, 17, 12, 0, 0);
+
+  function raw(entries: ReadonlyArray<{ t: number; z: string }>): string {
+    return JSON.stringify({ v: 1, e: entries });
+  }
+
+  // The store keeps its cache in module state, so every test stores a raw string no earlier test used (a unique
+  // millisecond offset), which makes its first read a real read instead of a cache hit on a previous test's snapshot.
+  let nonce = 0;
+
+  // The repro of the finding: 12 clicks stored 6 days before T0.
+  function sixDayClicks(): Array<{ t: number; z: string }> {
+    nonce += 1;
+    return Array.from({ length: 12 }, (_, i) => ({
+      t: T0 - 6 * DAY + i * 1000 + nonce,
+      z: i % 3 === 0 ? "iktidar" : i % 3 === 1 ? "muhalefet" : "bagimsiz",
+    }));
+  }
+
+  function setup(entries: ReadonlyArray<{ t: number; z: string }> = sixDayClicks()) {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const storage = makeFakeStorage({ initial: { [DIET_STORAGE_KEY]: raw(entries) } });
+    const win = stubWindow({ storage });
+    return { storage, ...win };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("a long-lived tab: the same raw string, read days later, no longer counts clicks that left the window", () => {
+    setup();
+    const first = readDietSnapshot();
+    expect(first.readAt).toBe(T0);
+    expect(summarizeDiet(first.entries, first.readAt).total).toBe(12);
+
+    vi.setSystemTime(T0 + 9 * DAY); // the clicks are now 15 days old; no click was stored in between
+    const later = readDietSnapshot();
+
+    expect(later.readAt).toBe(T0 + 9 * DAY);
+    const summary = summarizeDiet(later.entries, later.readAt);
+    expect(summary.total).toBe(0); // week
+    expect(summary.total30d).toBe(12); // month: still inside 30 days
+    expect(summary.leastRead).toBeNull();
+  });
+
+  it("clicks older than 30 days leave the 30-day window too, without any storage change", () => {
+    setup();
+    expect(summarizeDiet(readDietSnapshot().entries, T0).total30d).toBe(12);
+
+    vi.setSystemTime(T0 + 25 * DAY); // 31 days old
+    const later = readDietSnapshot();
+    expect(summarizeDiet(later.entries, later.readAt).total30d).toBe(0);
+  });
+
+  it("the refreshed snapshot is a new object (so subscribers re-render) that keeps the very same entries array", () => {
+    setup();
+    const first = readDietSnapshot();
+    vi.setSystemTime(T0 + DIET_SNAPSHOT_MAX_AGE_MS);
+    const later = readDietSnapshot();
+
+    expect(later).not.toBe(first);
+    expect(later.entries).toBe(first.entries);
+    expect(later.available).toBe(first.available);
+  });
+
+  it("inside the max age two reads return the identical object (useSyncExternalStore must not loop)", () => {
+    setup();
+    const first = readDietSnapshot();
+    vi.setSystemTime(T0 + DIET_SNAPSHOT_MAX_AGE_MS - 1);
+    expect(readDietSnapshot()).toBe(first);
+    expect(readDietSnapshot()).toBe(first);
+  });
+
+  it("after a refresh the new anchor is stable again until it ages out in turn", () => {
+    setup();
+    readDietSnapshot();
+    vi.setSystemTime(T0 + 2 * DIET_SNAPSHOT_MAX_AGE_MS);
+    const second = readDietSnapshot();
+    expect(readDietSnapshot()).toBe(second);
+    vi.setSystemTime(T0 + 2 * DIET_SNAPSHOT_MAX_AGE_MS + DIET_SNAPSHOT_MAX_AGE_MS - 1);
+    expect(readDietSnapshot()).toBe(second);
+    vi.setSystemTime(T0 + 3 * DIET_SNAPSHOT_MAX_AGE_MS);
+    expect(readDietSnapshot()).not.toBe(second);
+  });
+
+  it("a clock that jumped backwards re-stamps instead of anchoring the windows in the future", () => {
+    setup();
+    const first = readDietSnapshot();
+    vi.setSystemTime(T0 - 2 * DAY);
+    const later = readDietSnapshot();
+    expect(later).not.toBe(first);
+    expect(later.readAt).toBe(T0 - 2 * DAY);
+  });
+
+  it("a changed raw string still re-parses and re-stamps at once", () => {
+    const { storage } = setup();
+    const first = readDietSnapshot();
+    vi.setSystemTime(T0 + 1000);
+    storage._store.set(DIET_STORAGE_KEY, raw([{ t: T0, z: "iktidar" }]));
+    const next = readDietSnapshot();
+    expect(next).not.toBe(first);
+    expect(next.entries).toHaveLength(1);
+    expect(next.readAt).toBe(T0 + 1000);
+  });
+
+  it("an unavailable store stays unavailable and empty across a refresh", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    stubWindow({ throwOnLocalStorageGetter: true });
+    const first = readDietSnapshot();
+    expect(first.available).toBe(false);
+    vi.setSystemTime(T0 + DAY);
+    const later = readDietSnapshot();
+    expect(later.available).toBe(false);
+    expect(later.entries).toEqual([]);
+  });
+
+  describe("subscribeDiet nudges the subscriber when the tab comes back", () => {
+    function stubDocument(visibilityState: "visible" | "hidden") {
+      const listeners = new Map<string, Set<(e: unknown) => void>>();
+      const fakeDocument = {
+        visibilityState,
+        addEventListener: (type: string, cb: (e: unknown) => void) => {
+          if (!listeners.has(type)) listeners.set(type, new Set());
+          listeners.get(type)!.add(cb);
+        },
+        removeEventListener: (type: string, cb: (e: unknown) => void) => {
+          listeners.get(type)?.delete(cb);
+        },
+        dispatchEvent: (e: Event) => {
+          for (const cb of listeners.get(e.type) ?? []) cb(e);
+          return true;
+        },
+      };
+      vi.stubGlobal("document", fakeDocument);
+      return { fakeDocument, listeners };
+    }
+
+    it.each(["pageshow", "focus"])("%s on the window calls onChange", (type) => {
+      const { fakeWindow } = setup();
+      stubDocument("visible");
+      const onChange = vi.fn();
+      const unsubscribe = subscribeDiet(onChange);
+      fakeWindow.dispatchEvent(new Event(type));
+      expect(onChange).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    });
+
+    it("visibilitychange to visible calls onChange, to hidden does not", () => {
+      setup();
+      const { fakeDocument } = stubDocument("hidden");
+      const onChange = vi.fn();
+      const unsubscribe = subscribeDiet(onChange);
+
+      fakeDocument.dispatchEvent(new Event("visibilitychange"));
+      expect(onChange).not.toHaveBeenCalled();
+
+      fakeDocument.visibilityState = "visible";
+      fakeDocument.dispatchEvent(new Event("visibilitychange"));
+      expect(onChange).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    });
+
+    it("a coarse tick calls onChange while the tab is visible and stays quiet while it is hidden", () => {
+      setup();
+      const { fakeDocument } = stubDocument("visible");
+      const onChange = vi.fn();
+      const unsubscribe = subscribeDiet(onChange);
+      vi.advanceTimersByTime(0); // the one check made right after subscribing
+      onChange.mockClear();
+
+      vi.advanceTimersByTime(DIET_CLOCK_TICK_MS);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(DIET_CLOCK_TICK_MS);
+      expect(onChange).toHaveBeenCalledTimes(2);
+
+      fakeDocument.visibilityState = "hidden";
+      vi.advanceTimersByTime(3 * DIET_CLOCK_TICK_MS);
+      expect(onChange).toHaveBeenCalledTimes(2);
+      unsubscribe();
+    });
+
+    it("checks once right after subscribing (a hidden <Activity> that is revealed re-subscribes)", () => {
+      setup();
+      stubDocument("visible");
+      const onChange = vi.fn();
+      const unsubscribe = subscribeDiet(onChange);
+      expect(onChange).not.toHaveBeenCalled(); // never synchronously inside subscribe
+      vi.advanceTimersByTime(0);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    });
+
+    it("unsubscribing removes every listener and stops the tick and the first check", () => {
+      const { listeners } = setup();
+      const doc = stubDocument("visible");
+      const onChange = vi.fn();
+      const unsubscribe = subscribeDiet(onChange);
+      unsubscribe();
+
+      for (const type of ["storage", "tayf:diyet-change", "pageshow", "focus"]) {
+        expect(listeners.get(type)?.size ?? 0).toBe(0);
+      }
+      expect(doc.listeners.get("visibilitychange")?.size ?? 0).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+
+      vi.advanceTimersByTime(10 * DIET_CLOCK_TICK_MS);
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it("works with no document at all (the listeners on window and the tick still run)", () => {
+      const { fakeWindow } = setup();
+      const onChange = vi.fn();
+      const unsubscribe = subscribeDiet(onChange);
+      fakeWindow.dispatchEvent(new Event("focus"));
+      expect(onChange).toHaveBeenCalledTimes(1);
+      unsubscribe();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("end to end: a tick after days makes the subscriber read a snapshot whose windows have moved", () => {
+      setup();
+      stubDocument("visible");
+      const seen: number[] = [];
+      const onChange = () => {
+        const snap = readDietSnapshot();
+        seen.push(summarizeDiet(snap.entries, snap.readAt).total);
+      };
+      const first = readDietSnapshot();
+      expect(summarizeDiet(first.entries, first.readAt).total).toBe(12);
+      const unsubscribe = subscribeDiet(onChange);
+
+      vi.advanceTimersByTime(9 * DAY);
+      unsubscribe();
+
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen[0]).toBe(12); // right after subscribing nothing had aged yet
+      expect(seen.at(-1)).toBe(0);
+    });
   });
 });

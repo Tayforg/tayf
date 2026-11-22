@@ -3,15 +3,19 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { foldTr } from "@/lib/clusters/turkish-query";
+import { ENGINE_STOP_WORDS } from "@/lib/search/relaxed-search";
 import {
   MIN_QUERY_LENGTH,
   SEARCH_QUERY_DISPLAY_MAX,
   archivePagePhrase,
   displayQuery,
+  isStopWordOnlyQuery,
   isTooShortQuery,
   resultCountPhrase,
   searchStatusText,
   searchTitle,
+  stopWordOnlyStatus,
 } from "./search-status";
 
 // h10-a11y-2: the live-region sentence a screen-reader user hears after the
@@ -311,6 +315,167 @@ describe("searchStatusText: a too-short query", () => {
     expect(searchStatusText({ ...base, q: "a b", count: 2 })).toBe(
       "“a b” için 2 sonuç bulundu.",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h206-search-3: a query whose every term is a word the search engine throws away ('ve', 'bu', 'daha', 'için')
+// is never searched: the archive's tsquery for it is empty, and the page used to say '“ve” için 3 sonuç bulundu'
+// (the in-feed title filter) while hundreds of live headlines hold 've'. It is treated like the too-short case.
+// ---------------------------------------------------------------------------
+
+describe("isStopWordOnlyQuery (h206-search-3)", () => {
+  it.each(["ve", "Ve", "VE", "ve bu", "daha", "için", "İÇİN", '"ve"', '"ve bu"', "  ve   bu  ", "ve, bu!", "bu'nun", "o"])(
+    "is true for %j (every term is an engine stop word)",
+    (q) => {
+      expect(isStopWordOnlyQuery(q)).toBe(true);
+    },
+  );
+
+  it.each(["ve erdoğan", "erdoğan ve", "ve -erdoğan", "-ve", "ve or bu", "icin", "ICIN", "nasil", "mi", "ab", "erdoğan", "zaman"])(
+    "is false for %j (a real lexeme or another word is present)",
+    (q) => {
+      expect(isStopWordOnlyQuery(q)).toBe(false);
+    },
+  );
+
+  it.each(["", "   ", "\t\n", "!!", '""', "-", "​"])("is false for %j (no term at all)", (q) => {
+    expect(isStopWordOnlyQuery(q)).toBe(false);
+  });
+
+  it("does not ASCII-fold: 'icin' is a real lexeme to the engine, 'için' is not", () => {
+    expect(isStopWordOnlyQuery("icin")).toBe(false);
+    expect(isStopWordOnlyQuery("için")).toBe(true);
+    expect(isStopWordOnlyQuery("ve icin")).toBe(false);
+  });
+
+  // db-LOW-3 (h206 review, replayed read-only on production 2026-11-21): the archive's tsquery is empty for most stop
+  // words ('ve', 'bu', 'daha'), but 14 of them hold ç/ğ/ı/ş/ü and their ASCII fold, which the archive's folded arm also
+  // searches (p_folded), is an ordinary lexeme (için -> 'iç', şu -> 'su', tüm -> 'tum', nasıl -> 'nasil'): search_cluster_ids
+  // returned 24 (capped) rows of noise for için, şu and nasıl. They are blocked on purpose; this list pins them, so a change
+  // to ENGINE_STOP_WORDS has to update the comments of isStopWordOnlyQuery and page.tsx deliberately.
+  const FOLDS_TO_A_LEXEME = [
+    "bazı",
+    "birkaç",
+    "birşey",
+    "çok",
+    "çünkü",
+    "eğer",
+    "hiç",
+    "için",
+    "nasıl",
+    "niçin",
+    "şey",
+    "tüm",
+    "mı",
+    "şu",
+  ];
+
+  it("pins the stop words whose ASCII fold is NOT a stop word (the 14 the archive's folded arm can still search)", () => {
+    const words = [...ENGINE_STOP_WORDS].filter((w) => foldTr(w) !== w && !ENGINE_STOP_WORDS.has(foldTr(w)));
+    expect(words.sort()).toEqual([...FOLDS_TO_A_LEXEME].sort());
+    expect(words).toHaveLength(14);
+  });
+
+  it.each(FOLDS_TO_A_LEXEME)("%j is blocked in its Turkish spelling, and its ASCII fold stays searchable", (word) => {
+    expect(isStopWordOnlyQuery(word)).toBe(true);
+    expect(isStopWordOnlyQuery(foldTr(word))).toBe(false);
+  });
+
+  it("judges the terms the archive searches: only the first six canonical terms count", () => {
+    expect(isStopWordOnlyQuery("ve bu ve bu ve bu erdoğan")).toBe(true);
+    expect(isStopWordOnlyQuery("ve bu ve bu ve erdoğan")).toBe(false);
+  });
+
+  it("is linear and total on a pasted wall of text (never throws)", () => {
+    expect(isStopWordOnlyQuery("ve ".repeat(5_000))).toBe(true);
+    expect(isStopWordOnlyQuery(`${"ve ".repeat(5_000)}erdoğan`)).toBe(true); // the sixth-term cut: the archive never sees 'erdoğan'
+    expect(isStopWordOnlyQuery("😀 ve")).toBe(true); // an emoji is not a term
+  });
+});
+
+describe("stopWordOnlyStatus (h206-search-3)", () => {
+  it("quotes the query and asks for a more distinctive word", () => {
+    expect(stopWordOnlyStatus("ve")).toBe("“ve” tek başına aranamıyor: daha belirgin bir kelime yazın.");
+    expect(stopWordOnlyStatus("  ve   bu ")).toBe("“ve bu” tek başına aranamıyor: daha belirgin bir kelime yazın.");
+  });
+
+  it("caps the echoed query like every other sentence (60 code points)", () => {
+    const text = stopWordOnlyStatus("ve ".repeat(100));
+    expect(text.startsWith("“")).toBe(true);
+    expect(text.endsWith("” tek başına aranamıyor: daha belirgin bir kelime yazın.")).toBe(true);
+    expect(Array.from(text.slice(1, text.indexOf("”")))).toHaveLength(SEARCH_QUERY_DISPLAY_MAX);
+  });
+
+  it("returns a q containing markup verbatim as plain text", () => {
+    expect(stopWordOnlyStatus("<b>")).toBe("“<b>” tek başına aranamıyor: daha belirgin bir kelime yazın.");
+  });
+});
+
+describe("searchStatusText: a stop-word-only query (h206-search-3)", () => {
+  const stop = "“ve” tek başına aranamıyor: daha belirgin bir kelime yazın.";
+
+  it("says it cannot be searched alone instead of announcing a count", () => {
+    expect(searchStatusText({ ...base, q: "ve" })).toBe(stop);
+    expect(searchStatusText({ ...base, q: "Ve", count: 3 })).toBe("“Ve” tek başına aranamıyor: daha belirgin bir kelime yazın.");
+    expect(searchStatusText({ ...base, q: "ve bu", count: 3 })).toBe(
+      "“ve bu” tek başına aranamıyor: daha belirgin bir kelime yazın.",
+    );
+  });
+
+  it("wins over a stale count, a capped archive, a failed archive and a later archive page", () => {
+    expect(searchStatusText({ q: "ve", count: 3, capped: false, unavailable: false })).toBe(stop);
+    expect(searchStatusText({ q: "ve", count: 50, capped: true, unavailable: false })).toBe(stop);
+    expect(searchStatusText({ q: "ve", count: 0, capped: false, unavailable: true })).toBe(stop);
+    expect(searchStatusText({ q: "ve", count: 24, capped: true, unavailable: false, archivePage: 2 })).toBe(stop);
+    expect(searchStatusText({ q: "ve", count: 0, capped: false, unavailable: true, archivePage: 3, pageUnavailable: true })).toBe(stop);
+    expect(searchStatusText({ q: "ve", count: 0, capped: false, unavailable: false, sort: "yeni" })).toBe(stop);
+  });
+
+  it("never says 'sonuç bulundu', 'sonuç bulunamadı' or 'yanıt vermiyor' for it", () => {
+    for (const unavailable of [false, true]) {
+      const text = searchStatusText({ ...base, q: "ve", count: 3, unavailable });
+      expect(text).not.toContain("sonuç");
+      expect(text).not.toContain("yanıt vermiyor");
+    }
+  });
+
+  it("keeps the too-short copy for a one-character query, and the floor wins for 'o'", () => {
+    expect(searchStatusText({ ...base, q: "a" })).toBe("En az 2 karakter yazın.");
+    expect(searchStatusText({ ...base, q: "o" })).toBe("En az 2 karakter yazın.");
+  });
+
+  it("stays empty for a blank q", () => {
+    expect(searchStatusText({ ...base, q: "  " })).toBe("");
+    expect(searchStatusText({ ...base, q: undefined })).toBe("");
+  });
+
+  it("does not touch a query with at least one non-stop-word term", () => {
+    expect(searchStatusText({ ...base, q: "ve erdoğan", count: 2 })).toBe("“ve erdoğan” için 2 sonuç bulundu.");
+    expect(searchStatusText({ ...base, q: "icin", count: 2 })).toBe("“icin” için 2 sonuç bulundu.");
+    expect(searchStatusText({ ...base, q: "mi" })).toBe("“mi” için sonuç bulunamadı.");
+    expect(searchStatusText({ ...base, q: "ab", count: 1 })).toBe("“ab” için 1 sonuç bulundu.");
+  });
+});
+
+describe("src/app/page.tsx wiring (h206-search-3)", () => {
+  // Render tests of server components are not kept in this repo (AGENTS.md), so the wiring is pinned as text, as the
+  // MIN_QUERY_LENGTH test above does for search-query.ts. Both the title (generateMetadata, via searchArchivePage) and the
+  // body (HomeFeed) must count a stop-word-only query as "not searched", and the in-feed title filter must match no card
+  // for it (its token 've' is two characters, so the filter would otherwise list the cards that hold the word).
+  const page = readFileSync(resolve(here, "../../app/page.tsx"), "utf8");
+
+  it("treats a stop-word-only query as not searched in searchArchivePage and in HomeFeed", () => {
+    expect(page.match(/isStopWordOnlyQuery\(q\)/g)?.length).toBe(2);
+    expect(page).toMatch(/const tooShort = belowFloor \|\| stopWordOnly;\s*const searchable = typed && !tooShort;/);
+  });
+
+  it("lets the length floor win over the stop-word list, and keeps the too-short copy for it", () => {
+    expect(page).toMatch(/const stopWordOnly = typed && !belowFloor && isStopWordOnlyQuery\(q\);/);
+  });
+
+  it("runs the in-feed filter for no stop-word-only query", () => {
+    expect(page).toMatch(/const matchesQuery = \(b: ClusterBundle\) =>\s*!stopWordOnly &&/);
   });
 });
 

@@ -296,6 +296,88 @@ describe("GET /api/cron/social — kill switches / config", () => {
   });
 });
 
+// h203-wire-callers: the bundle carries the cluster page's wire signal
+// (isWireRedistribution + effectiveArticleCount); the route hands it to the composer
+// so a post counts a wire redistribution in distinct texts. Which clusters are
+// posted is not touched: a wire blindspot is still never selected (select.ts), and a
+// wire top story still needs 10 distinct texts, so this is a top story of 22 members
+// that repeat 10 texts.
+describe("GET /api/cron/social — wire redistribution counts (h203-wire-callers)", () => {
+  function topStoryBundle(id: string, overrides: Record<string, unknown> = {}) {
+    const voices = [
+      ...Array.from({ length: 12 }, (_, i) => ({ id: `p${i}`, name: `P${i}`, bias: "pro_government", kind: "outlet" })),
+      ...Array.from({ length: 6 }, (_, i) => ({ id: `c${i}`, name: `C${i}`, bias: "center", kind: "outlet" })),
+      ...Array.from({ length: 4 }, (_, i) => ({ id: `o${i}`, name: `O${i}`, bias: "opposition", kind: "outlet" })),
+    ];
+    return {
+      cluster: {
+        id,
+        title_tr: "Bütçe görüşmeleri sürüyor",
+        first_published: new Date(Date.now() - 1 * 3600 * 1000).toISOString(),
+        is_blindspot: false,
+      },
+      articles: [],
+      sources: voices,
+      blindspotPending: false,
+      isWireRedistribution: true,
+      effectiveArticleCount: 10,
+      ...overrides,
+    };
+  }
+
+  async function dryRunTopStoryText(
+    bundle: unknown,
+    channel: "telegram" | "bluesky" = "telegram",
+  ): Promise<string> {
+    if (channel === "telegram") {
+      process.env.TELEGRAM_BOT_TOKEN = "t";
+      process.env.TELEGRAM_CHANNEL_ID = "c";
+    } else {
+      process.env.BLUESKY_HANDLE = "tayf.bsky.social";
+      process.env.BLUESKY_APP_PASSWORD = "app-password";
+    }
+    process.env.SOCIAL_POST_DRY_RUN = "1";
+    mocks.politics = { bundles: [bundle] };
+
+    const { GET } = await import("@/app/api/cron/social/route");
+    const res = await GET(request());
+    const body = await res.json();
+    const previews = body.previews as Array<{ channel: string; kind: string; text: string }>;
+    const preview = previews.find((p) => p.channel === channel && p.kind === "top_story");
+    expect(preview).toBeDefined();
+    return preview!.text;
+  }
+
+  it("a wire top story prints the distinct-text head, the votes and the wire cue", async () => {
+    const text = await dryRunTopStoryText(topStoryBundle("top-wire"));
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("Gündem · 10 kaynak · 22 sınıflandırılmış, 3 bölge");
+    expect(lines[2]).toBe("İktidar 12 · Bağımsız 6 · Muhalefet 4");
+    expect(lines[3]).toBe("Ajans ağırlıklı · 22 haber, 10 farklı metin");
+    expect(text).not.toContain("22 kaynak");
+  });
+
+  it("a wire top story on Bluesky prints the same distinct-text head and wire cue", async () => {
+    const text = await dryRunTopStoryText(topStoryBundle("top-wire-bsky"), "bluesky");
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("Gündem · 10 kaynak · 22 sınıflandırılmış, 3 bölge");
+    expect(lines[2]).toBe("İktidar 12 · Bağımsız 6 · Muhalefet 4");
+    expect(lines[3]).toBe("Ajans ağırlıklı · 22 haber, 10 farklı metin");
+    expect(text).not.toContain("22 kaynak");
+  });
+
+  it("a plain top story keeps today's text", async () => {
+    const text = await dryRunTopStoryText(
+      topStoryBundle("top-plain", { isWireRedistribution: false, effectiveArticleCount: 22 }),
+    );
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("Gündem · 22 kaynak, 3 bölge");
+    expect(lines[2]).toBe("İktidar 12 · Bağımsız 6 · Muhalefet 4");
+    expect(lines[3]).toMatch(/^Kim nasıl yazdı: https:\/\/tayfhaber\.com\/cluster\/top-plain/);
+    expect(text).not.toContain("Ajans ağırlıklı");
+  });
+});
+
 describe("GET /api/cron/social — happy paths", () => {
   it("Telegram only: claim returns 7, posts once, finishes posted", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "t";

@@ -8,6 +8,15 @@ import { resolve } from "node:path";
 const trackMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/track", () => ({ track: trackMock }));
 
+// OyunModes reads useRouter().bfcacheId (Next's per-navigation id, see the
+// [h201-game-1] suite at the bottom) and RetryButton calls useRouter().refresh().
+// The tests call OyunModes as a plain function, so a real useRouter would throw
+// for want of an app router; this stand-in has the one mutable id they need.
+const nav = vi.hoisted(() => ({ bfcacheId: "_b_1_" }));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ bfcacheId: nav.bfcacheId, refresh: () => {} }),
+}));
+
 // A hook runtime for the copy-flow suite at the bottom of the file. While a
 // test has one mounted it replaces the hooks DailyGame uses; with none mounted
 // (the static renders above) every hook is React's own.
@@ -129,6 +138,7 @@ import {
   type Phase,
 } from "./daily-game";
 import { OyunModes } from "./oyun-modes";
+import { applyDailyResult, parseDailyStore } from "@/lib/game/daily-share";
 import { ManualCopyBox } from "@/components/story/share-button";
 import type { DailyHeadline, DailyPuzzle } from "@/lib/game/daily-set";
 import { ZONE_META } from "@/lib/bias/config";
@@ -1112,5 +1122,335 @@ describe("DailyGame — reveal copy after a wrong guess (behaviour)", () => {
     const sentence = "Haberet · Bağımsız — Tayf'ın etiketiyle aynı";
     expect(view.visible()).toBe(sentence);
     expect(view.announcement()).toBe(sentence);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-game-1: Next 16 (cacheComponents) keeps a route's client state when /oyun
+// is entered again with other search params, or after midnight within the three
+// preserved routes, and only RE-RENDERS the page with the new props. DailyGame
+// kept its localPhase / playedThisSession / marks, so today's puzzle opened on
+// the previous puzzle's finished screen: today's answers (the zone chips) for a
+// puzzle never played, the old marks as the score, the old marks in Paylaş, and
+// no "Başla".
+//
+// The harness models exactly that: ONE OyunModes instance (its state survives
+// the navigation, only its props change) and the DailyGame child it renders,
+// which React keeps while the element's key is unchanged and replaces with a
+// fresh instance when the key changes.
+// ---------------------------------------------------------------------------
+describe("OyunModes — a different puzzle never inherits the previous puzzle's round [h201-game-1]", () => {
+  type El = { type?: unknown; key?: unknown; props?: Record<string, unknown> };
+  type ModesProps = Parameters<typeof OyunModes>[0];
+  type GameProps = Parameters<typeof DailyGame>[0];
+
+  function walk(node: unknown, visit: (el: El) => void): void {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child, visit);
+    } else if (node && typeof node === "object") {
+      const el = node as El;
+      if (el.type !== undefined) visit(el);
+      walk(el.props?.children, visit);
+    }
+  }
+
+  function find(node: unknown, pred: (el: El) => boolean): El | undefined {
+    let hit: El | undefined;
+    walk(node, (el) => {
+      if (hit === undefined && pred(el)) hit = el;
+    });
+    return hit;
+  }
+
+  const text = (node: unknown): string =>
+    Array.isArray(node)
+      ? node.map(text).join("")
+      : typeof node === "string" || typeof node === "number"
+        ? String(node)
+        : node && typeof node === "object"
+          ? text((node as El).props?.children)
+          : "";
+
+  const TAYF_TAB = "Günün Tayf’ı";
+
+  function puzzleFor(dateKey: string, number: number, tag: string): DailyPuzzle {
+    return {
+      dateKey,
+      number,
+      windowLabel: `${dateKey} penceresi`,
+      headlines: Array.from({ length: 5 }, (_, i) => ({
+        articleId: `h201-${tag}-${i}`,
+        sourceId: `h201-source-${tag}-${i}`,
+        title: `Başlık ${tag} ${i} — siyasi bir gelişme`,
+        url: `https://ornek.com/h201-${tag}-${i}`,
+        sourceName: `Kaynak ${tag} ${i}`,
+        sourceSlug: `kaynak-${tag}-${i}`,
+        zone: "iktidar" as const,
+        clusterId: null,
+      })),
+    };
+  }
+
+  /** A localStorage that keeps what DailyGame writes, so a result can be stored before the page opens. */
+  function stubBrowser(storedResults: Record<string, boolean[]> = {}) {
+    let stored: string | null = null;
+    for (const [dateKey, marks] of Object.entries(storedResults)) {
+      stored = JSON.stringify(
+        applyDailyResult(parseDailyStore(stored), {
+          dateKey,
+          todayKey: dateKey,
+          score: marks.filter(Boolean).length,
+          marks,
+        }),
+      );
+    }
+    const shared: string[] = [];
+    vi.stubGlobal("navigator", {
+      share: async ({ text: shareText }: { text: string }) => {
+        shared.push(shareText);
+      },
+    });
+    vi.stubGlobal("window", {
+      localStorage: {
+        getItem: () => stored,
+        setItem: (_key: string, value: string) => {
+          stored = value;
+        },
+      },
+      location: { origin: "https://tayf.test" },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => true,
+      setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms),
+      clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
+    });
+    // The guess POST is fire-and-forget; the stub keeps it off the network.
+    vi.stubGlobal("fetch", vi.fn(async () => ({})));
+    return { shared };
+  }
+
+  function mountPage(first: ModesProps) {
+    let props = first;
+    const modes = new rt.Runtime(() => OyunModes(props));
+    let game: {
+      key: unknown;
+      /** What the running DailyGame instance reads its props from on every render. */
+      holder: { props: GameProps };
+      app: InstanceType<typeof rt.Runtime>;
+    } | null = null;
+
+    /** One commit: the page renders, then React keeps or replaces the DailyGame child by its key. */
+    const commit = () => {
+      modes.render();
+      const el = find(modes.outputs[modes.outputs.length - 1], (e) => e.type === DailyGame);
+      if (!el) {
+        game = null;
+        return;
+      }
+      if (game === null || game.key !== el.key) {
+        const holder = { props: el.props as unknown as GameProps };
+        game = { key: el.key, holder, app: new rt.Runtime(() => DailyGame(holder.props)) };
+      } else {
+        game.holder.props = el.props as unknown as GameProps;
+      }
+      game.app.render();
+    };
+    commit();
+
+    const gameTree = () => game?.app.outputs[game.app.outputs.length - 1];
+    const modesTree = () => modes.outputs[modes.outputs.length - 1];
+    const pressIn = (tree: unknown, label: string) => {
+      const button = find(tree, (el) => el.type === "button" && text(el) === label);
+      expect(button, `a "${label}" button`).toBeDefined();
+      (button!.props!.onClick as () => void)();
+    };
+
+    return {
+      /** The same OyunModes instance re-rendered with new props: a same-route navigation. */
+      navigate(next: Partial<ModesProps>) {
+        props = { ...props, ...next };
+        commit();
+      },
+      pressTab(label: string) {
+        pressIn(modesTree(), label);
+        commit();
+      },
+      pressGame(label: string) {
+        pressIn(gameTree(), label);
+        commit();
+      },
+      /** Plays all five headlines with one zone's button. */
+      playRound(zone: MediaDnaZone) {
+        this.pressGame("Başla");
+        for (let i = 0; i < 5; i++) {
+          this.pressGame(ZONE_META[zone].label);
+          this.pressGame("Sonraki");
+        }
+      },
+      gameText: () => text(gameTree()),
+      gameKey: () => game?.key,
+      isPressed: (label: string) =>
+        find(modesTree(), (el) => el.type === "button" && text(el) === label)?.props?.["aria-pressed"],
+      hasDailyGame: () => game !== null,
+    };
+  }
+
+  const EMPTY_BOLGE = [] as const;
+  const pageProps = (daily: DailyPuzzle | null, todayKey: string, initialMode: "bolge" | "gunluk" = "gunluk") => ({
+    headlines: EMPTY_BOLGE,
+    daily,
+    todayKey,
+    initialMode,
+  });
+
+  beforeEach(() => {
+    nav.bfcacheId = "_b_1_";
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("replay of 14 Nov finished, then the footer link opens today's puzzle: today's answers are not shown and Başla is back", () => {
+    stubBrowser();
+    const replay = puzzleFor("2026-11-14", 48, "replay");
+    const today = puzzleFor("2026-11-17", 51, "today");
+    const page = mountPage(pageProps(replay, "2026-11-17"));
+
+    page.playRound("muhalefet");
+    expect(page.gameText()).toContain("Tayf’ın etiketiyle 0/5 aynı");
+
+    page.navigate(pageProps(today, "2026-11-17"));
+
+    const screen = page.gameText();
+    expect(screen).toContain("Başla");
+    expect(screen).toContain("Günün Tayf’ı #51");
+    expect(screen).not.toContain("Paylaş");
+    expect(screen).not.toContain("etiketiyle"); // no score line
+    for (const h of today.headlines) {
+      expect(screen).not.toContain(h.title);
+      expect(screen).not.toContain(h.sourceName);
+    }
+  });
+
+  it("midnight: #51 finished, /oyun re-entered after 00:00 Istanbul with #52, which can be played", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-17", 51, "mid-a"), "2026-11-17"));
+    page.playRound("iktidar");
+    expect(page.gameText()).toContain("Tayf’ın etiketiyle 5/5 aynı");
+
+    page.navigate(pageProps(puzzleFor("2026-11-18", 52, "mid-b"), "2026-11-18"));
+
+    expect(page.gameText()).toContain("Günün Tayf’ı #52");
+    expect(page.gameText()).not.toContain("Paylaş");
+    page.pressGame("Başla");
+    expect(page.gameText()).toContain("1 / 5");
+  });
+
+  it("the share text and the marks follow the puzzle on screen, not the round played before it", async () => {
+    const { shared } = stubBrowser({ "2026-11-17": [true, true, false, false, false] });
+    const page = mountPage(pageProps(puzzleFor("2026-11-14", 48, "share-a"), "2026-11-17"));
+    page.playRound("muhalefet"); // 0/5 on the replay
+
+    page.navigate(pageProps(puzzleFor("2026-11-17", 51, "share-b"), "2026-11-17"));
+
+    // Today's puzzle IS in the store (2/5), so it opens on its own result screen.
+    expect(page.gameText()).toContain("Tayf’ın etiketiyle 2/5 aynı");
+    expect(page.gameText()).toContain("Bugünün oyununu oynadın");
+    page.pressGame("Paylaş");
+    await Promise.resolve();
+    expect(shared).toEqual([
+      "Günün Tayf'ı #51 · 2/5\n✅✅❌❌❌\nhttps://tayf.test/oyun?mod=gunluk&gun=2026-11-17",
+    ]);
+  });
+
+  it("a round under way is kept while the page re-renders with the SAME puzzle (a new object, same date)", () => {
+    stubBrowser();
+    const puzzle = puzzleFor("2026-11-17", 51, "same");
+    const page = mountPage(pageProps(puzzle, "2026-11-17"));
+    page.pressGame("Başla");
+    page.pressGame(ZONE_META.iktidar.label);
+    page.pressGame("Sonraki");
+    expect(page.gameText()).toContain("2 / 5");
+
+    const keyBefore = page.gameKey();
+    page.navigate(pageProps({ ...puzzle, headlines: [...puzzle.headlines] }, "2026-11-17"));
+
+    expect(page.gameKey()).toBe(keyBefore);
+    expect(page.gameText()).toContain("2 / 5");
+  });
+
+  it("a puzzle that could not be built (null) and the puzzle that follows it do not share a key", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(null, "2026-11-17"));
+    const noPuzzleKey = page.gameKey();
+    page.navigate(pageProps(puzzleFor("2026-11-17", 51, "null-next"), "2026-11-17"));
+    expect(page.gameKey()).not.toBe(noPuzzleKey);
+    expect(page.gameText()).toContain("Başla");
+  });
+
+  it("OyunModes follows a changed initialMode: /oyun?mod=gunluk after /oyun opens the daily tab", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-17", 51, "mode"), "2026-11-17", "bolge"));
+    expect(page.isPressed("Bölge")).toBe(true);
+    expect(page.hasDailyGame()).toBe(false);
+
+    page.navigate({ initialMode: "gunluk" });
+
+    expect(page.isPressed(TAYF_TAB)).toBe(true);
+    expect(page.isPressed("Bölge")).toBe(false);
+    expect(page.hasDailyGame()).toBe(true);
+    expect(page.gameText()).toContain("Başla");
+  });
+
+  it("and back: /oyun after /oyun?gun=... shows the Bölge tab again", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-14", 48, "back"), "2026-11-17", "gunluk"));
+    expect(page.isPressed(TAYF_TAB)).toBe(true);
+
+    page.navigate({ initialMode: "bolge" });
+
+    expect(page.isPressed("Bölge")).toBe(true);
+    expect(page.isPressed(TAYF_TAB)).toBe(false);
+  });
+
+  it("a tab the reader picked is not overridden while initialMode stays the same", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-17", 51, "keep"), "2026-11-17", "bolge"));
+    page.pressTab(TAYF_TAB);
+    expect(page.isPressed(TAYF_TAB)).toBe(true);
+
+    page.navigate(pageProps(puzzleFor("2026-11-18", 52, "keep-2"), "2026-11-18", "bolge"));
+
+    expect(page.isPressed(TAYF_TAB)).toBe(true);
+    expect(page.isPressed("Bölge")).toBe(false);
+  });
+
+  // The home teaser's "Oyna" and the footer link are <Link> pushes to /oyun?mod=gunluk.
+  // With the route kept in a hidden Activity, the SAME OyunModes instance gets the
+  // same initialMode again, so only the navigation id can tell a fresh entry apart.
+  it("a second entry with ?mod=gunluk opens the daily tab again, though the reader had picked Bölge in between", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-17", 51, "again-a"), "2026-11-17", "gunluk"));
+    page.pressTab("Bölge");
+    expect(page.isPressed("Bölge")).toBe(true);
+
+    nav.bfcacheId = "_b_2_"; // a <Link> push into /oyun: Next hands the page a new id
+    page.navigate(pageProps(puzzleFor("2026-11-18", 52, "again-b"), "2026-11-18", "gunluk"));
+
+    expect(page.isPressed(TAYF_TAB)).toBe(true);
+    expect(page.isPressed("Bölge")).toBe(false);
+    expect(page.hasDailyGame()).toBe(true);
+    expect(page.gameText()).toContain("Günün Tayf’ı #52");
+    expect(page.gameText()).toContain("Başla");
+  });
+
+  it("the same initialMode and an unchanged navigation id (router.refresh, Back, a search-param change) leave the picked tab alone", () => {
+    stubBrowser();
+    const page = mountPage(pageProps(puzzleFor("2026-11-17", 51, "refresh-a"), "2026-11-17", "gunluk"));
+    page.pressTab("Bölge");
+
+    // RetryButton's refresh() under a ?mod=gunluk URL re-renders with fresh props, same id.
+    page.navigate(pageProps(puzzleFor("2026-11-17", 51, "refresh-a"), "2026-11-17", "gunluk"));
+
+    expect(page.isPressed("Bölge")).toBe(true);
+    expect(page.isPressed(TAYF_TAB)).toBe(false);
   });
 });

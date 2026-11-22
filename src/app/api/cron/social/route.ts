@@ -90,6 +90,17 @@ function toCandidateBundle(b: BlindspotBundle | ClusterBundle): SocialCandidateB
   };
 }
 
+// h203-wire-callers: the bundle's own wire signal (the cluster page's), so a post
+// counts a wire redistribution in distinct texts like every other surface. Both
+// fields are already on the bundle: no extra read, and no effect on which clusters
+// are selected (select.ts reads them for that on its own).
+function composeWireFields(b: BlindspotBundle | ClusterBundle) {
+  return {
+    isWireRedistribution: b.isWireRedistribution,
+    effectiveArticleCount: b.effectiveArticleCount,
+  };
+}
+
 function planChannel(
   channel: SocialChannel,
   blindspotBundles: readonly BlindspotBundle[],
@@ -149,6 +160,7 @@ function planChannel(
         clusterUrl,
         dominantZone: original.dominantZone,
         sources: original.sources,
+        ...composeWireFields(original),
       });
       posts.push({ channel, kind: "blindspot", clusterId: bundle.cluster.id, text, postUrl: clusterUrl });
     } else {
@@ -157,6 +169,7 @@ function planChannel(
         clusterUrl,
         dominantZone: original.dominantZone,
         sources: original.sources,
+        ...composeWireFields(original),
       });
       posts.push({
         channel,
@@ -178,6 +191,7 @@ function planChannel(
           title: topStory.cluster.title_tr,
           clusterUrl,
           sources: original.sources,
+          ...composeWireFields(original),
         });
         posts.push({ channel, kind: "top_story", clusterId: topStory.cluster.id, text, postUrl: clusterUrl });
       } else {
@@ -185,6 +199,7 @@ function planChannel(
           title: topStory.cluster.title_tr,
           clusterUrl,
           sources: original.sources,
+          ...composeWireFields(original),
         });
         posts.push({
           channel,

@@ -185,6 +185,85 @@ describe("GET /api/oembed — parameter rules", () => {
     expect((await call({ url: clusterUrl(), format: "json" })).status).toBe(200);
   });
 
+  // oEmbed 1.0 s2.2: format is optional, so an empty value is "unspecified", and
+  // some consumers send it upper-case (h203-oembed).
+  describe("format is optional and case-insensitive (h203-oembed)", () => {
+    it.each([
+      ["empty", ""],
+      ["one space", " "],
+      ["whitespace only", " \t "],
+      ["JSON", "JSON"],
+      ["Json", "Json"],
+      ["padded json", " json "],
+      ["padded JSON", "\tJSON\n"],
+    ])("format=%s answers 200 with the same body and headers as format=json", async (_name, format) => {
+      getClusterDetailMock.mockResolvedValue(found());
+      const reference = await call({ url: clusterUrl(), format: "json" });
+      const res = await call({ url: clusterUrl(), format });
+      expect(res.status).toBe(200);
+      expectCors(res);
+      expect(res.headers.get("cache-control")).toBe(reference.headers.get("cache-control"));
+      expect(await res.text()).toBe(await reference.text());
+    });
+
+    it("treats a raw empty `format=` and a %20 format the same way", async () => {
+      getClusterDetailMock.mockResolvedValue(found());
+      const raw = (qs: string) => GET(new Request(`https://tayfhaber.com/api/oembed?${qs}`));
+      const u = encodeURIComponent(clusterUrl());
+      expect((await raw(`format=&url=${u}`)).status).toBe(200);
+      expect((await raw(`url=${u}&format=`)).status).toBe(200);
+      expect((await raw(`format=%20&url=${u}`)).status).toBe(200);
+      expect((await raw(`format=JSON&url=${u}`)).status).toBe(200);
+    });
+
+    it.each([
+      ["XML", "XML"],
+      ["xml", "xml"],
+      ["foo", "foo"],
+      ["jsonp", "jsonp"],
+      ["json with a suffix", "json2"],
+      ["json inside text", "x json"],
+    ])("format=%s keeps the 501 with the same body and negative cache", async (_name, format) => {
+      const res = await call({ url: clusterUrl(), format });
+      expect(res.status).toBe(501);
+      expectCors(res);
+      expect(res.headers.get("cache-control")).toBe("public, s-maxage=300");
+      expect(await res.json()).toEqual({ error: "Only format=json is supported" });
+      expect(getClusterDetailMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps the status order 501 -> 400 -> 404 for the relaxed values", async () => {
+      // An unsupported format still wins over a missing or foreign url.
+      expect((await call({ format: "XML" })).status).toBe(501);
+      expect((await call({ format: "foo", url: "https://evil.com/x" })).status).toBe(501);
+      // An empty or upper-case json format falls through to the url checks.
+      expect((await call({ format: "" })).status).toBe(400);
+      expect((await call({ format: "  " })).status).toBe(400);
+      expect((await call({ format: "JSON" })).status).toBe(400);
+      expect((await call({ format: "", url: "https://evil.com/x" })).status).toBe(404);
+      expect((await call({ format: "JSON", url: "https://evil.com/x" })).status).toBe(404);
+      expect(getClusterDetailMock).not.toHaveBeenCalled();
+    });
+
+    it("still reaches the reader outcomes (404 no cluster, 503 read failure) with a relaxed format", async () => {
+      getClusterDetailMock.mockResolvedValue(null);
+      const missing = await call({ url: clusterUrl(), format: "JSON" });
+      expect(missing.status).toBe(404);
+      expect(missing.headers.get("cache-control")).toBe("public, s-maxage=300");
+      control.throwNext = true;
+      const failed = await call({ url: clusterUrl(), format: "" });
+      expect(failed.status).toBe(503);
+      expect(failed.headers.get("cache-control")).toBe("no-store");
+    });
+
+    it("does not read any other new parameter (maxwidth still applies, an unknown one is ignored)", async () => {
+      getClusterDetailMock.mockResolvedValue(found());
+      const body = await (await call({ url: clusterUrl(), format: "JSON", maxwidth: "300", callback: "x" })).json();
+      expect(body.width).toBe(300);
+      expect(body.html).toBe(buildIframeSnippet(ORIGIN, ID, 300, 200));
+    });
+  });
+
   describe("maxwidth", () => {
     it.each([
       ["300", 300],

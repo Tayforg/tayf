@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { RetryButton } from "@/components/ui/retry-button";
 import { ZoneGuessGame } from "@/components/game/zone-guess-game";
@@ -68,6 +69,27 @@ export function OyunModes({
   const [mode, setMode] = useState<OyunMode>(initialMode);
   // Tabs opened so far: each is rendered once and kept (see the doc comment).
   const [opened, setOpened] = useState<ReadonlySet<OyunMode>>(() => new Set([initialMode]));
+  // What `mode` / `opened` were last seeded from: the `initialMode` and Next's
+  // `bfcacheId`. Next 16 (cacheComponents) keeps this component's state when
+  // /oyun is entered again (a hidden Activity), and only re-renders it with the
+  // new props, so the URL's tab has to be followed here or /oyun?mod=gunluk
+  // stays on the Bölge tab the previous visit left open. `bfcacheId` changes on
+  // every push/replace into /oyun (the teaser's 'Oyna', the footer link), so
+  // the URL's tab wins on a fresh entry even when `initialMode` is the same as
+  // last time. It stays the same for router.refresh() (RetryButton), back/forward
+  // and search-param-only changes, so Back restores the picked tab and a retry
+  // does not move the reader. (A per-request stamp from the server would change
+  // on refresh() too, and pull a retry on Bölge over to the daily tab.)
+  const { bfcacheId } = useRouter();
+  const [seededFrom, setSeededFrom] = useState<{ mode: OyunMode; bfcacheId: string }>({
+    mode: initialMode,
+    bfcacheId,
+  });
+  if (seededFrom.mode !== initialMode || seededFrom.bfcacheId !== bfcacheId) {
+    setSeededFrom({ mode: initialMode, bfcacheId });
+    setMode(initialMode);
+    setOpened((prev) => (prev.has(initialMode) ? prev : new Set([...prev, initialMode])));
+  }
 
   const selectMode = (m: OyunMode) => {
     setMode(m);
@@ -142,7 +164,16 @@ export function OyunModes({
       )}
       {opened.has("gunluk") && (
         <div hidden={mode !== "gunluk"}>
-          <DailyGame puzzle={daily} todayKey={todayKey} fellBack={dailyFellBack} />
+          {/* Keyed by the puzzle: DailyGame's round (phase, marks, share text) belongs
+              to ONE puzzle, so a re-render with another date (a replay link, the
+              footer link, midnight) must start a fresh instance instead of showing
+              the finished screen, and its answers, of a puzzle never played. */}
+          <DailyGame
+            key={daily?.dateKey ?? "none"}
+            puzzle={daily}
+            todayKey={todayKey}
+            fellBack={dailyFellBack}
+          />
         </div>
       )}
     </div>

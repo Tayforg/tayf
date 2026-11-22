@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { BIAS_ORDER } from "@/lib/bias/config";
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
 import { mobileBannerImageProps } from "@/components/story/cluster-card";
+import { clusterHubKeys } from "./cluster-hub-keys";
 import {
   RISING_ENTITIES,
   RISING_HUB_SPECS,
@@ -462,6 +463,10 @@ const MSB_EXCLUDES = ["polonya milli savunma"] as const;
 const IMAMOGLU_EXCLUDES = ["imamoglu ilce", "tugberk imamoglu"] as const;
 const IMAMOGLU_NOT_AFTER = ["adana", "tugberk"] as const;
 
+/** The other Babacans and Demirtaşes that veto the bare surname (folded; h205-gundem-1, the spec restated). */
+const BABACAN_EXCLUDES = ["nuray babacan", "abdurrahman babacan", "meral babacan"] as const;
+const DEMIRTAS_EXCLUDES = ["ismail demirtas", "kaymakam demirtas", "ozgur demirtas"] as const;
+
 /**
  * The foreign cues that veto the generic-word hubs (folded; h128-hubs-1, the spec restated). Hub-only: no migration
  * mirrors them and /trends never reads them. Each list is what the 2026-11-11 replay left standing: a cue that
@@ -469,7 +474,7 @@ const IMAMOGLU_NOT_AFTER = ["adana", "tugberk"] as const;
  */
 const ENFLASYON_HUB_EXCLUDES = ["abd", "fed", "ingiltere", "new york borsa"] as const;
 const FAIZ_HUB_EXCLUDES = ["abd", "fed", "ecb", "ingiltere", "new york borsa"] as const;
-const DOLAR_HUB_EXCLUDES = ["ara secim", "fed", "irak", "cin"] as const;
+const DOLAR_HUB_EXCLUDES = ["ara secim", "fed", "irak", "cin", "dolarsa", "dolarken"] as const;
 const BORSA_HUB_EXCLUDES = ["abd", "cin", "japonya"] as const;
 const ASGARI_UCRET_HUB_EXCLUDES = ["banglades"] as const;
 /** borsa's own `excludes` (the markets list of h43-entities-2, untouched by h128-hubs-1). */
@@ -552,6 +557,11 @@ describe("entityHubForms", () => {
       "Recep Tayyip Erdoğan",
     ]);
   });
+
+  it("babacan and demirtas: the bare surname first, then the full name of the politician (h205-gundem-1)", () => {
+    expect(entityHubForms(entityByKey("babacan")!)).toEqual(["Babacan", "Ali Babacan"]);
+    expect(entityHubForms(entityByKey("demirtas")!)).toEqual(["Demirtaş", "Selahattin Demirtaş"]);
+  });
 });
 
 describe("entityHubPatterns (exact runtime values)", () => {
@@ -605,6 +615,10 @@ describe("entityHubPatterns (exact runtime values)", () => {
       `${guardPrefix(IMAMOGLU_EXCLUDES)}\\m${notAfterLookbehinds(IMAMOGLU_NOT_AFTER)}imamoglu\\M`,
       `\\m${notAfterLookbehinds(IMAMOGLU_NOT_AFTER)}ekrem\\s+imamoglu`,
     ],
+    // The bare surname is vetoed by the other Babacans and Demirtaşes named in the story; the politician's full
+    // name is trusted (bare), so it wins over a veto in the same story (h205-gundem-1).
+    babacan: [`${guardPrefix(BABACAN_EXCLUDES)}\\mbabacan\\M`, "\\mali\\s+babacan"],
+    demirtas: [`${guardPrefix(DEMIRTAS_EXCLUDES)}\\mdemirtas\\M`, "\\mselahattin\\s+demirtas"],
     chp: ["\\mchp\\M"],
     cin: ["\\mcin\\M"],
     "asgari-ucret": [`${guardPrefix([], undefined, ASGARI_UCRET_HUB_EXCLUDES)}\\masgari\\s+ucret`],
@@ -617,11 +631,11 @@ describe("entityHubPatterns (exact runtime values)", () => {
     // The bare 'Merkez Bankası' is vetoed by a foreign bank anywhere in the text and needs one monetary-policy
     // cue (h61-emptystates-2); 'TCMB' is trusted and stays bare.
     tcmb: [
-      "^(?![\\s\\S]*(?:\\mavrupa\\s+merkez|\\mecb\\M|\\mfed\\M|\\mabd\\s+merkez|\\mamerikan\\s+merkez|\\misrail\\s+merkez|\\mingiltere\\s+merkez|\\mjaponya\\s+merkez|\\mrusya\\s+merkez|\\mcin\\s+merkez))(?=[\\s\\S]*(?:\\mtcmb|\\mkarahan|\\mppk\\M|\\mpara\\s+politika|\\mfaiz|\\menflasyon|\\mrezerv|\\mturk\\s+lira|\\mdoviz|\\mkur\\s+korumal|\\mturkiye\\s+cumhuriyet\\s+merkez|\\mpiyasa\\s+katilimci|\\mtbmm|\\mrepo))[\\s\\S]*\\mmerkez\\s+bankasi",
+      "^(?![\\s\\S]*(?:\\mavrupa\\s+merkez|\\mecb\\M|\\mfed\\M|\\mabd\\s+merkez|\\mamerikan\\s+merkez|\\misrail\\s+merkez|\\mingiltere\\s+merkez|\\mjaponya\\s+merkez|\\mrusya\\s+merkez|\\mcin\\s+merkez))(?=[\\s\\S]*(?:\\mtcmb|\\mkarahan|\\mppk\\M|\\mpara\\s+politika|\\mfaiz|\\menflasyon|\\mrezerv|\\mturk\\s+lira|\\mdoviz|\\mkur\\s+korumal|\\mturkiye\\s+cumhuriyet\\s+merkez|\\mpiyasa\\s+katilimci|\\mtbmm|\\mrepo|\\mbanknot|\\mtedavul|\\mkavcioglu))[\\s\\S]*\\mmerkez\\s+bankasi",
       "\\mtcmb\\M",
     ],
     meclis: [
-      "^(?![\\s\\S]*(?:\\mtemsilciler\\s+meclisi|\\mknesset|\\misrail|\\miran|\\mlibya|\\mbelediye\\s+meclis|\\mil\\s+genel\\s+meclis|\\milce\\s+meclis|\\mmahalle\\s+meclis|\\mulusal\\s+meclis|\\mrum\\s+meclis|\\mgkry|\\mticaret\\s+odas|\\msanayi\\s+odas|\\mito\\M|\\mmto\\M|\\matso|\\mbelediyesi\\s+meclis|\\mbuyuksehir\\s+meclis|\\mmeclis\\s+uyes|\\marnavutluk))(?![\\s\\S]*(?:\\mparti\\s+meclisi|\\mkktc|\\mcumhuriyet\\s+meclisi|\\mhirvatistan|\\mfederal\\s+meclis|\\mbundestag|\\mibb\\s+meclis|\\mdanisma\\s+meclis|\\mkadin\\s+meclis|\\mbaris\\s+anneleri|\\misig\\s+meclis))(?=[\\s\\S]*(?:\\mtbmm|\\mgenel\\s+kurul|\\mmilletvekil|\\mkanun\\s+teklif|\\myasa\\s+teklif|\\mgrup\\s+toplanti|\\mkurtulmus|\\mkomisyon|\\mbutce\\s+gorusme|\\mchp\\M|\\makp\\M|\\mak\\s+parti|\\mmhp\\M|\\mdem\\s+parti|\\miyi\\s+parti|\\myeniden\\s+refah))[\\s\\S]*\\mmeclis",
+      "^(?![\\s\\S]*(?:\\mtemsilciler\\s+meclisi|\\mknesset|\\misrail|\\miran|\\mlibya|\\mbelediye\\s+meclis|\\mil\\s+genel\\s+meclis|\\milce\\s+meclis|\\mmahalle\\s+meclis|\\mulusal\\s+meclis|\\mrum\\s+meclis|\\mgkry|\\mticaret\\s+odas|\\msanayi\\s+odas|\\mito\\M|\\mmto\\M|\\matso|\\mbelediyesi\\s+meclis|\\mbuyuksehir\\s+meclis|\\mmeclis\\s+uyes|\\marnavutluk))(?![\\s\\S]*(?:\\mparti\\s+meclisi|\\mkktc|\\mcumhuriyet\\s+meclisi|\\mhirvatistan|\\mfederal\\s+meclis|\\mbundestag|\\mibb\\s+meclis|\\mdanisma\\s+meclis|\\mkadin\\s+meclis|\\mbaris\\s+anneleri|\\misig\\s+meclis|\\msirbistan\\s+meclis|\\mkosova\\s+meclis|\\myunanistan\\s+meclis))(?=[\\s\\S]*(?:\\mtbmm|\\mgenel\\s+kurul|\\mmilletvekil|\\mkanun\\s+teklif|\\myasa\\s+teklif|\\mgrup\\s+toplanti|\\mkurtulmus|\\mkomisyon|\\mbutce\\s+gorusme|\\mchp\\M|\\makp\\M|\\mak\\s+parti|\\mmhp\\M|\\mdem\\s+parti|\\miyi\\s+parti|\\myeniden\\s+refah))[\\s\\S]*\\mmeclis",
       "\\mtbmm",
       "\\mbuyuk\\s+millet\\s+meclisi",
     ],
@@ -1106,6 +1120,42 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
     expect(hubMatches("dolar", "Dolar 49,57 liradan")).toBe(true);
   });
 
+  // h205-gundem-2: /gundem/dolar's only cluster (3e07bd69, Kleopatra Koyu) was the verb "dolmak" ("süre dolarsa"), and the
+  // open 'dolar' prefix also reads "sular okul bahçesine dolarken" (9a4507ab). Neither says "dolar" as a currency, so both
+  // verb forms veto the story (hub-only, open-ended: 'dolarsa' also catches "dolarsa,").
+  it("dolar: the verb forms 'dolarsa' and 'dolarken' (dolmak) are out, the currency stays (h205-gundem-2)", () => {
+    expect(
+      hubMatches(
+        "dolar",
+        "Kleopatra Koyu'nda izinsiz yapılara 3 ay süre verildi; süre dolarsa belediye hakkında idari ve cezai soruşturma başlatılacak",
+      ),
+    ).toBe(false);
+    expect(hubMatches("dolar", "Süre dolarsa, yapılar kaldırılacak")).toBe(false);
+    expect(hubMatches("dolar", "Alibey Deresi taştı: sular okul bahçesine dolarken bölgede su seviyesi yükseldi")).toBe(false);
+    expect(hubMatches("dolar", "Dolar/TL rekor")).toBe(true);
+    expect(hubMatches("dolar", "Dolara talep arttı")).toBe(true);
+    expect(hubMatches("dolar", "Dolar 49,57 liradan")).toBe(true);
+    // The other forms the 120-day tally found (dolarlık, doları, doların, dolardan, dolarla) are untouched.
+    for (const sample of ["Dolardan kaçış sürüyor", "Doların rekoru", "Dolarla ödeme", "Dolarında yeni zirve", "Doları rekor kırdı"]) {
+      expect(hubMatches("dolar", sample), sample).toBe(true);
+    }
+  });
+
+  it("dolar: the story page names no 'dolar' hub for the Kleopatra verb story (cluster-hub-keys reads the same patterns)", () => {
+    const kleopatra = {
+      title_tr: "Kleopatra Koyu'ndaki kaçak yapılar için karar",
+      title_tr_neutral: null,
+      summary_tr:
+        "Kleopatra Koyu'nda kaldırılması istenen yapılar için süre dolarsa belediye hakkında idari ve cezai soruşturma başlatılacak.",
+      article_count: 3,
+      is_archived: false,
+      merged_into: null,
+    };
+    expect(clusterHubKeys(kleopatra)).not.toContain("dolar");
+    // The control: the same row with a currency word in the lead does name the hub.
+    expect(clusterHubKeys({ ...kleopatra, summary_tr: "Dolar/TL rekor kırdı." })).toContain("dolar");
+  });
+
   it("dolar: an amount ('2,1 milyar dolarlık', '12 milyon doları', '100 dolar') is out", () => {
     expect(hubMatches("dolar", "2,1 milyar dolarlık Patriot")).toBe(false);
     expect(hubMatches("dolar", "12 milyon doları")).toBe(false);
@@ -1207,6 +1257,68 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
       ]) {
         expect(hubMatches("tcmb", sample), sample).toBe(false);
       }
+    });
+
+    // h205-gundem-3: /gundem/tcmb listed one card and missed the week's banknote stories about the Turkish bank (24c9ec02 and
+    // 722984ff: Ali Babacan on the signed banknotes in circulation, 640f920f: the fourth bureaucrat whose signature is on the
+    // banknotes, Kavcıoğlu). They name the bank but none of the monetary words, so three more cues count: 'banknot', 'tedavul'
+    // and 'kavcioglu' (the former governor who signed the notes). The excludes are untouched.
+    it("the banknote stories of the Turkish bank are in: 'banknot', 'tedavül' and 'Kavcıoğlu' are cues (h205-gundem-3)", () => {
+      expect(
+        hubMatches(
+          "tcmb",
+          "Ali Babacan tedavüldeki üç banknotu işaret etti: imzası olan paraların Merkez Bankası tarafından toplatılmasını istedi",
+        ),
+      ).toBe(true);
+      expect(
+        hubMatches(
+          "tcmb",
+          "Parada imzası olan dördüncü bürokrat da gitti: Merkez Bankası başkanlığı döneminde banknotlarda imzası bulunan Kavcıoğlu",
+        ),
+      ).toBe(true);
+    });
+
+    it("each new cue is enough on its own", () => {
+      expect(hubMatches("tcmb", "Merkez Bankası yeni banknotları tedavüle sürecek")).toBe(true);
+      expect(hubMatches("tcmb", "Merkez Bankası banknotlar için açıklama yaptı")).toBe(true);
+      expect(hubMatches("tcmb", "Merkez Bankası tedavülden kaldırılan paraları açıkladı")).toBe(true);
+      expect(hubMatches("tcmb", "Eski Merkez Bankası Başkanı Kavcıoğlu hakkında karar")).toBe(true);
+    });
+
+    it("the new cues do not reopen the door for the listed foreign banks, and no cue still means out", () => {
+      expect(hubMatches("tcmb", "Paraguay'da Merkez Bankası bankaya el koyup tasfiyeyi başlattı")).toBe(false);
+      expect(hubMatches("tcmb", "Avrupa Merkez Bankası yeni banknot serisini tanıttı")).toBe(false);
+      expect(hubMatches("tcmb", "ABD Merkez Bankası banknot basımını artırdı")).toBe(false);
+      expect(hubMatches("tcmb", "Rusya Merkez Bankası tedavüldeki banknotları değiştirecek")).toBe(false);
+      // A bare cue word is not 'merkez bankasi' itself: no bank named, no hit.
+      expect(hubMatches("tcmb", "Yeni banknot serisi tedavülde")).toBe(false);
+    });
+
+    it("accepted leak (h205-gundem-3): an unlisted foreign bank's banknote story passes on banknot/tedavül, as its rate story already passes on faiz", () => {
+      expect(hubMatches("tcmb", "Özbekistan Merkez Bankası yeni banknot bastı")).toBe(true);
+      // The e31ee65f lead (1 article, archived): not in any live hub, but the pattern admits it.
+      expect(
+        hubMatches("tcmb", "Kanada Merkez Bankası, Kral 3. Charles portreli yeni 20 dolarlık banknotu tanıttı"),
+      ).toBe(true);
+      expect(hubMatches("tcmb", "Kanada Merkez Bankası faizi indirdi")).toBe(true);
+    });
+
+    it("the cue list ends with the three new cues, and the excludes are the migration 163 list, unchanged", () => {
+      expect(RISING_HUB_SPECS.tcmb?.requires?.slice(-3)).toEqual(["banknot", "tedavul", "kavcioglu"]);
+      expect(RISING_HUB_SPECS.tcmb?.requires).toHaveLength(17);
+      expect(RISING_HUB_SPECS.tcmb?.excludes).toEqual([
+        "avrupa merkez",
+        "ecb",
+        "fed",
+        "abd merkez",
+        "amerikan merkez",
+        "israil merkez",
+        "ingiltere merkez",
+        "japonya merkez",
+        "rusya merkez",
+        "cin merkez",
+      ]);
+      expect(entityByKey("tcmb")!.tokens).toEqual(["tcmb", "merkez bankasi"]);
     });
 
     it("a trusted TCMB mention wins over the missing cue, but not over a foreign cue", () => {
@@ -1622,6 +1734,71 @@ describe("person and ministry hubs (h96-entityhubs-1)", () => {
   });
 });
 
+describe("babacan and demirtas hubs: the bare surname also names other people (h205-gundem-1)", () => {
+  // Real leads of 2026-11-20. 97d210af / 9d679682 (a columnist), 02a78080 (an AK Parti MP) and 96ad1204 (a district
+  // governor) all repeat the bare surname in the lead ("Babacan, ..."), so a per-occurrence notAfter guard cannot
+  // tell them apart: the story-level veto plus the trusted full name is the erdogan design (emine / bilal).
+  const NURAY =
+    "Nefes gazetesi yazarı Nuray Babacan, yazısında İmralı’da bulunan Abdullah Öcalan’ın görüşmesinin tartışmaya açıldığını öne sürdü. Babacan, “Bir iddiaya göre ...” ifadelerini kullandı.";
+  const ABDURRAHMAN =
+    "ASELSAN'dan Malatya'ya dev yatırım. AK Parti Malatya Milletvekili Abdurrahman Babacan, ilk fabrikanın Ağustos 2027'de tamamlanacağını söyledi.";
+  const KAYMAKAM =
+    "Kars Akyaka'da Kaymakam İsmail Demirtaş ve İl Genel Meclis Başkanı Fuat Arslan sınırdaki demir yolu çalışmalarını inceledi. Demirtaş, firma yetkilisinden bilgi aldı.";
+
+  it("babacan: Nuray, Abdurrahman and Meral Babacan are out, bare surname in the lead or not", () => {
+    expect(hubMatches("babacan", NURAY)).toBe(false);
+    expect(hubMatches("babacan", ABDURRAHMAN)).toBe(false);
+    expect(hubMatches("babacan", "Meral Babacan cinayeti 11 yıl sonra aydınlatıldı")).toBe(false);
+  });
+
+  it("babacan: the DEVA leader stays, bare or with his first name; the full name beats a veto in the same story", () => {
+    expect(hubMatches("babacan", "DEVA lideri Babacan, Erbil'de sanatçı Perwer ile buluştu")).toBe(true);
+    expect(hubMatches("babacan", "Ali Babacan'dan Merkez Bankası'na çağrı")).toBe(true);
+    expect(hubMatches("babacan", "Nuray Babacan'ın iddiasına Ali Babacan'dan yanıt")).toBe(true);
+    expect(hubMatches("babacan", "Babacan: Faiz kararı yanlış")).toBe(true);
+  });
+
+  it("babacan: the veto reads folded text, so capitals and extra whitespace do not slip past it", () => {
+    expect(hubMatches("babacan", "NURAY   BABACAN yazdı. Babacan, iddiasını yineledi")).toBe(false);
+    expect(hubMatches("babacan", "Abdurrahman\nBabacan açıklama yaptı")).toBe(false);
+  });
+
+  it("demirtas: the district governor and Özgür Demirtaş the economist are out, bare surname in the lead or not", () => {
+    expect(hubMatches("demirtas", KAYMAKAM)).toBe(false);
+    expect(hubMatches("demirtas", "Kulis: Özgür Demirtaş, Cumhurbaşkanı Erdoğan'dan görev istedi")).toBe(false);
+    expect(hubMatches("demirtas", "Kaymakam Demirtaş yangın bölgesinde")).toBe(false);
+  });
+
+  it("demirtas: Selahattin Demirtaş stays, bare or full; the full name beats a veto in the same story", () => {
+    expect(hubMatches("demirtas", "Selahattin Demirtaş'ın tahliyesi için AİHM kararı")).toBe(true);
+    expect(hubMatches("demirtas", "Demirtaş'tan yeni mesaj")).toBe(true);
+    expect(hubMatches("demirtas", "Başak Demirtaş, Selahattin Demirtaş’ın kitaplarını imzaladı")).toBe(true);
+    expect(hubMatches("demirtas", "Selahattin Demirtaş ve Kaymakam İsmail Demirtaş aynı karede")).toBe(true);
+  });
+
+  it("the new specs are hub-only: the rollup tokens do not move and migration 163 still guards only tcmb, aym and meclis", () => {
+    expect(entityByKey("babacan")!.tokens).toEqual(["babacan"]);
+    expect(entityByKey("demirtas")!.tokens).toEqual(["demirtas"]);
+    expect(RISING_HUB_SPECS.babacan).toEqual({
+      aliases: ["Babacan", "Ali Babacan"],
+      trusted: ["Ali Babacan"],
+      excludes: ["nuray babacan", "abdurrahman babacan", "meral babacan"],
+    });
+    expect(RISING_HUB_SPECS.demirtas).toEqual({
+      aliases: ["Demirtaş", "Selahattin Demirtaş"],
+      trusted: ["Selahattin Demirtaş"],
+      excludes: ["ismail demirtas", "kaymakam demirtas", "ozgur demirtas"],
+    });
+    // The two keys are not in migration 163's guarded set (its parity test reads tcmb, aym and meclis only),
+    // so their excludes need no SQL twin: the same hub-only reading as erdogan's family-member list.
+    for (const key of ["babacan", "demirtas"]) {
+      expect(RISING_HUB_SPECS[key]!.hubExcludes, key).toBeUndefined();
+      expect(RISING_HUB_SPECS[key]!.requires, key).toBeUndefined();
+      expect(RISING_HUB_SPECS[key]!.headlineOnly, key).toBeUndefined();
+    }
+  });
+});
+
 describe("meclis hub: party, foreign and municipal councils are not the TBMM (h96-entityhubs-2)", () => {
   // Page 1 of /gundem/meclis listed four of these and the whole 14-day hub about nineteen: the requires cue was
   // satisfied by the matched phrase itself ('KKTC Meclis Başkanı', 'Parti Meclisi' under a party name).
@@ -1684,6 +1861,34 @@ describe("meclis hub: party, foreign and municipal councils are not the TBMM (h9
     expect(hubMatches("meclis", "Meclis Başkanlığı Divanı komisyon üyelerini belirledi")).toBe(true);
   });
 
+  // h205-gundem-4: page 1 of /gundem/meclis listed 7039919c ("Adem Mavrić, Sırbistan Meclisi başkanvekili seçildi"), and a
+  // 365-day replay found two more foreign parliaments that pass on the 'milletvekil' cue: 268911e0 (Kosova Meclisi) and
+  // 9dca0e37 (Yunanistan Meclis Disiplin Kurulu). A bare country word would also veto a TBMM story that mentions the
+  // country, so the vetoes are the phrases "<country> meclis".
+  it("another country's parliament named '<country> Meclis' is out: Serbia, Kosovo and Greece (h205-gundem-4)", () => {
+    expect(
+      hubMatches(
+        "meclis",
+        "Sakarya Üniversitesi mezunu Adem Mavrić, Sırbistan Meclisi başkanvekili seçildi; milletvekilleri oyladı",
+      ),
+    ).toBe(false);
+    expect(hubMatches("meclis", "Kosova Meclisi, milletvekillerinin oyuyla yeni Cumhurbaşkanını seçti")).toBe(false);
+    expect(
+      hubMatches("meclis", "Yunanistan Meclis Disiplin Kurulu 11 milletvekilinin dokunulmazlığını görüştü"),
+    ).toBe(false);
+  });
+
+  it("the Turkish parliament stays: a TBMM Speaker meeting another speaker, a bill, a story that only names a country", () => {
+    // c1f1b10d and 2b543a88 (real): TBMM Speaker Kurtulmuş with the North Macedonian and Georgian speakers carry the
+    // trusted 'TBMM', so no hub-only veto can drop them, and the new ones are not even asked.
+    expect(hubMatches("meclis", "TBMM Başkanı Kurtulmuş, Kuzey Makedonya Meclis Başkanı Gaşi ile görüştü")).toBe(true);
+    expect(hubMatches("meclis", "TBMM Başkanı Kurtulmuş, Sırbistan Meclisi Başkanı ile görüştü")).toBe(true);
+    expect(hubMatches("meclis", "Kanun teklifi Meclis'e sunuldu")).toBe(true);
+    // No bare country veto: the Turkish Meclis story that names Serbia, Kosovo or Greece without '<country> meclis' stays.
+    expect(hubMatches("meclis", "Meclis'te Yunanistan ile ilişkiler görüşüldü, milletvekilleri soru önergesi verdi")).toBe(true);
+    expect(hubMatches("meclis", "Kosova ve Sırbistan gerilimi Meclis gündeminde: milletvekilleri brifing aldı")).toBe(true);
+  });
+
   it("the new vetoes are hub-only: excludes stays the list migration 163 mirrors, and the rollup tokens do not move", () => {
     const spec = RISING_HUB_SPECS.meclis!;
     expect(spec.hubExcludes).toEqual([
@@ -1698,6 +1903,9 @@ describe("meclis hub: party, foreign and municipal councils are not the TBMM (h9
       "kadin meclis",
       "baris anneleri",
       "isig meclis",
+      "sirbistan meclis",
+      "kosova meclis",
+      "yunanistan meclis",
     ]);
     for (const ex of spec.hubExcludes!) expect(spec.excludes, ex).not.toContain(ex);
     // The hub-only list sits in a lookahead of its own, right behind the shared excludes and before the cues.
@@ -2040,7 +2248,9 @@ describe("invariants over every curated entity", () => {
     ).toEqual([
       "akp",
       "aym",
+      "babacan",
       "borsa",
+      "demirtas",
       "erdogan",
       "fidan",
       "imamoglu",
@@ -2131,13 +2341,13 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("excludes is curated on exactly aym, borsa, erdogan, imamoglu, meb, meclis, msb and tcmb; quantityGuard on dolar only", () => {
+  it("excludes is curated on exactly aym, babacan, borsa, demirtas, erdogan, imamoglu, meb, meclis, msb and tcmb; quantityGuard on dolar only", () => {
     expect(
       specs
         .filter(([, s]) => s.excludes !== undefined)
         .map(([k]) => k)
         .sort(),
-    ).toEqual(["aym", "borsa", "erdogan", "imamoglu", "meb", "meclis", "msb", "tcmb"]);
+    ).toEqual(["aym", "babacan", "borsa", "demirtas", "erdogan", "imamoglu", "meb", "meclis", "msb", "tcmb"]);
     expect(
       specs
         .filter(([, s]) => s.quantityGuard !== undefined)
@@ -2381,7 +2591,8 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
   // h61-emptystates-2. The cues are folded ASCII (the generic requires test checks that); the list is the
   // Turkish monetary-policy vocabulary: the bank's name, its governor, the policy committee and rate,
   // inflation, reserves, the lira, FX, the old FX-protected deposit, the market survey, the parliament
-  // week and the repo rate. 'repo' is last: the generic form-versus-cue test appends the last cue.
+  // week and the repo rate; h205-gundem-3 added the banknote vocabulary ('banknot', 'tedavul') and the former governor
+  // 'kavcioglu' whose signature is on the notes. 'kavcioglu' is last: the generic form-versus-cue test appends the last cue.
   it("the tcmb cues: the bank's own vocabulary, none of them a bare foreign-country word", () => {
     expect(RISING_HUB_SPECS.tcmb?.requires).toEqual([
       "tcmb",
@@ -2398,6 +2609,9 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
       "piyasa katilimci",
       "tbmm",
       "repo",
+      "banknot",
+      "tedavul",
+      "kavcioglu",
     ]);
   });
 

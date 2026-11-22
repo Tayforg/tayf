@@ -9,7 +9,18 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh }),
 }));
 
-import { NewClustersPill } from "./new-clusters-pill";
+import {
+  NewClustersPill,
+  STALE_LIST_PROBE_MS,
+  isListStale,
+  startStaleProbe,
+} from "./new-clusters-pill";
+import {
+  TIMELINE_POLL_MS,
+  startHeadPolling,
+  type HeadFetchResult,
+  type TimelineHeadRow,
+} from "@/lib/clusters/timeline-head";
 
 // Source-guard helpers. `code` below is the file with comments blanked.
 
@@ -601,5 +612,322 @@ describe("NewClustersPill -- counts against the page's 50th row, not its newest 
     expect(evaluate(mk(50), 50)).toBe("t49");
     expect(evaluate(mk(49), 50)).toBeNull();
     expect(evaluate(mk(0), 50)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h201-timeline-1: a first reader can be served a day-old cached list under "Son 24 saat", and the pill's first
+// poll came a full TIMELINE_POLL_MS (120 s) after mount. On mount the pill now compares the newest shown row with
+// the client clock and, when the list is older than STALE_LIST_PROBE_MS, probes /api/timeline/head at once. The
+// decision (isListStale) and the one-shot probe (startStaleProbe) take every side effect as a dependency, so they
+// are tested here with fakes; the wiring into the effect is pinned with source guards below.
+// ---------------------------------------------------------------------------
+
+describe("isListStale", () => {
+  const NOW = Date.UTC(2026, 10, 17, 16, 57, 0);
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+  const MIN = 60_000;
+
+  it("the threshold is 15 minutes", () => {
+    expect(STALE_LIST_PROBE_MS).toBe(15 * MIN);
+  });
+
+  it("is true for a list whose newest row is a day old (the observed 30 h copy too)", () => {
+    expect(isListStale(ago(24 * 60 * MIN), NOW)).toBe(true);
+    expect(isListStale(ago(30 * 60 * MIN), NOW)).toBe(true);
+  });
+
+  it("is true just past the threshold and false at or below it", () => {
+    expect(isListStale(ago(STALE_LIST_PROBE_MS + 1), NOW)).toBe(true);
+    expect(isListStale(ago(STALE_LIST_PROBE_MS), NOW)).toBe(false);
+    expect(isListStale(ago(STALE_LIST_PROBE_MS - 1), NOW)).toBe(false);
+    expect(isListStale(ago(0), NOW)).toBe(false);
+  });
+
+  it("is false for a newest row in the future (a client clock that runs behind)", () => {
+    expect(isListStale(ago(-10 * MIN), NOW)).toBe(false);
+  });
+
+  it("an empty page (null) has nothing to trust, so it is stale", () => {
+    expect(isListStale(null, NOW)).toBe(true);
+  });
+
+  it.each(["", "not a date", "2026-13-45"])("an unparseable newest %j is not judged (false), the poller covers it", (bad) => {
+    expect(isListStale(bad, NOW)).toBe(false);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])("a non-finite clock reading (%s) is not judged", (bad) => {
+    expect(isListStale(ago(24 * 60 * MIN), bad)).toBe(false);
+    expect(isListStale(null, bad)).toBe(false);
+  });
+});
+
+describe("startStaleProbe", () => {
+  const NOW = Date.UTC(2026, 10, 17, 16, 57, 0);
+  const STALE = new Date(NOW - 30 * 60 * 60_000).toISOString();
+  const FRESH = new Date(NOW - 60_000).toISOString();
+  const ROWS: TimelineHeadRow[] = [{ id: "c1", first_published: new Date(NOW - 5 * 60_000).toISOString() }];
+
+  function setup(opts: { visible?: boolean; result?: () => Promise<HeadFetchResult> } = {}) {
+    let visible = opts.visible ?? true;
+    let clock = NOW;
+    const visibilityListeners = new Set<() => void>();
+    const timers = new Map<number, () => void>();
+    let nextTimer = 1;
+    const signals: AbortSignal[] = [];
+    const fetchHead = vi.fn((signal: AbortSignal) => {
+      signals.push(signal);
+      return (opts.result ?? (() => Promise.resolve<HeadFetchResult>({ ok: true, rows: ROWS })))();
+    });
+    const onRows = vi.fn();
+    const deps = {
+      fetchHead,
+      onRows,
+      isVisible: () => visible,
+      subscribeVisibility: (cb: () => void) => {
+        visibilityListeners.add(cb);
+        return () => visibilityListeners.delete(cb);
+      },
+      now: () => clock,
+      // Only startHeadPolling uses these two (the poller shares this object in the double-fetch tests).
+      setTimer: (fn: () => void) => {
+        const id = nextTimer++;
+        timers.set(id, fn);
+        return id;
+      },
+      clearTimer: (handle: unknown) => {
+        timers.delete(handle as number);
+      },
+    };
+    return {
+      deps,
+      fetchHead,
+      onRows,
+      signals,
+      visibilityListeners,
+      timers,
+      advance(ms: number) {
+        clock += ms;
+      },
+      setVisible(v: boolean) {
+        visible = v;
+        for (const cb of [...visibilityListeners]) cb();
+      },
+    };
+  }
+
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  it("a stale list in a visible tab fetches the head at once, with an abort signal, and hands the rows over", async () => {
+    const t = setup();
+    startStaleProbe(t.deps, STALE);
+    expect(t.fetchHead).toHaveBeenCalledTimes(1); // immediately, not after TIMELINE_POLL_MS
+    expect(t.signals[0]).toBeInstanceOf(AbortSignal);
+    await flush();
+    expect(t.onRows).toHaveBeenCalledTimes(1);
+    expect(t.onRows).toHaveBeenCalledWith(ROWS);
+  });
+
+  it("an empty page is probed at once as well", async () => {
+    const t = setup();
+    startStaleProbe(t.deps, null);
+    expect(t.fetchHead).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(t.onRows).toHaveBeenCalledWith(ROWS);
+  });
+
+  it("a fresh list is left to the poller: no fetch and no visibility subscription", () => {
+    const t = setup();
+    const stop = startStaleProbe(t.deps, FRESH);
+    expect(t.fetchHead).not.toHaveBeenCalled();
+    expect(t.visibilityListeners.size).toBe(0);
+    expect(() => stop()).not.toThrow();
+  });
+
+  it("a hidden tab never fetches; the first time it turns visible the probe runs, once", async () => {
+    const t = setup({ visible: false });
+    startStaleProbe(t.deps, STALE);
+    expect(t.fetchHead).not.toHaveBeenCalled();
+    expect(t.visibilityListeners.size).toBe(1);
+
+    t.setVisible(false); // another change event while still hidden
+    expect(t.fetchHead).not.toHaveBeenCalled();
+
+    t.setVisible(true);
+    expect(t.fetchHead).toHaveBeenCalledTimes(1);
+    expect(t.visibilityListeners.size).toBe(0); // done waiting
+    await flush();
+    expect(t.onRows).toHaveBeenCalledWith(ROWS);
+
+    t.setVisible(false);
+    t.setVisible(true);
+    expect(t.fetchHead).toHaveBeenCalledTimes(1); // one probe per start
+  });
+
+  it("a non-ok answer or a rejection hands nothing over and does not throw", async () => {
+    const bad = setup({ result: () => Promise.resolve<HeadFetchResult>({ ok: false, retryAfterMs: 5000 }) });
+    startStaleProbe(bad.deps, STALE);
+    const rejected = setup({ result: () => Promise.reject(new TypeError("offline")) });
+    startStaleProbe(rejected.deps, STALE);
+    await flush();
+    expect(bad.fetchHead).toHaveBeenCalledTimes(1);
+    expect(rejected.fetchHead).toHaveBeenCalledTimes(1);
+    expect(bad.onRows).not.toHaveBeenCalled();
+    expect(rejected.onRows).not.toHaveBeenCalled();
+  });
+
+  it("a throwing onRows is swallowed (no unhandled rejection)", async () => {
+    const t = setup();
+    t.onRows.mockImplementation(() => {
+      throw new Error("consumer bug");
+    });
+    startStaleProbe(t.deps, STALE);
+    await flush();
+    expect(t.onRows).toHaveBeenCalledTimes(1);
+  });
+
+  it("stop() aborts the request in flight and drops its result", async () => {
+    let resolve: (r: HeadFetchResult) => void = () => {};
+    const t = setup({ result: () => new Promise<HeadFetchResult>((r) => (resolve = r)) });
+    const stop = startStaleProbe(t.deps, STALE);
+    expect(t.signals[0]?.aborted).toBe(false);
+    stop();
+    expect(t.signals[0]?.aborted).toBe(true);
+    resolve({ ok: true, rows: ROWS });
+    await flush();
+    expect(t.onRows).not.toHaveBeenCalled();
+  });
+
+  it("stop() while still waiting for the tab to show unsubscribes and never fetches", () => {
+    const t = setup({ visible: false });
+    const stop = startStaleProbe(t.deps, STALE);
+    expect(t.visibilityListeners.size).toBe(1);
+    stop();
+    expect(t.visibilityListeners.size).toBe(0);
+    t.setVisible(true);
+    expect(t.fetchHead).not.toHaveBeenCalled();
+  });
+
+  it("stop() is idempotent", () => {
+    const t = setup();
+    const stop = startStaleProbe(t.deps, STALE);
+    expect(() => {
+      stop();
+      stop();
+    }).not.toThrow();
+  });
+
+  // A tab that is hidden at mount: the poller counts mount as its last attempt, so a reveal after
+  // TIMELINE_POLL_MS polls at once (its catch-up poll), and the deferred probe gives way to it.
+  describe("a deferred probe gives way to the poller's catch-up poll", () => {
+    it("a reveal after 3 min: the probe does not fetch and stops listening", () => {
+      const t = setup({ visible: false });
+      startStaleProbe(t.deps, STALE);
+      t.advance(3 * 60_000);
+      t.setVisible(true);
+      expect(t.fetchHead).not.toHaveBeenCalled();
+      expect(t.visibilityListeners.size).toBe(0);
+      t.setVisible(false);
+      t.setVisible(true);
+      expect(t.fetchHead).not.toHaveBeenCalled(); // and it never wakes up again
+    });
+
+    it("a reveal after 30 s: the poller has nothing due, so the probe fetches, once", () => {
+      const t = setup({ visible: false });
+      startStaleProbe(t.deps, STALE);
+      t.advance(30_000);
+      t.setVisible(true);
+      expect(t.fetchHead).toHaveBeenCalledTimes(1);
+      expect(t.visibilityListeners.size).toBe(0);
+    });
+
+    it("the cut is the poller's own first delay: one ms short of it the probe still fetches", () => {
+      const early = setup({ visible: false });
+      startStaleProbe(early.deps, STALE);
+      early.advance(TIMELINE_POLL_MS - 1);
+      early.setVisible(true);
+      expect(early.fetchHead).toHaveBeenCalledTimes(1);
+
+      const due = setup({ visible: false });
+      startStaleProbe(due.deps, STALE);
+      due.advance(TIMELINE_POLL_MS);
+      due.setVisible(true);
+      expect(due.fetchHead).not.toHaveBeenCalled();
+    });
+
+    it("a visible mount is unaffected: the probe fetches at once whatever the clock says", () => {
+      const t = setup();
+      startStaleProbe(t.deps, STALE);
+      expect(t.fetchHead).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["a reveal after 3 min", 3 * 60_000],
+      ["a reveal after 30 s", 30_000],
+      ["a reveal exactly at the poll interval", TIMELINE_POLL_MS],
+    ])("poller and probe on one shared deps object, %s: exactly one fetch", (_name, hiddenMs) => {
+      const t = setup({ visible: false });
+      const stopPolling = startHeadPolling(t.deps);
+      const stopProbe = startStaleProbe(t.deps, STALE);
+      expect(t.fetchHead).not.toHaveBeenCalled(); // hidden: neither fetches
+      t.advance(hiddenMs);
+      t.setVisible(true); // ONE visibilitychange
+      expect(t.fetchHead).toHaveBeenCalledTimes(1);
+      stopProbe();
+      stopPolling();
+    });
+
+    it("the order the two subscribed in does not matter: still exactly one fetch", () => {
+      for (const hiddenMs of [30_000, 3 * 60_000]) {
+        const t = setup({ visible: false });
+        const stopProbe = startStaleProbe(t.deps, STALE);
+        const stopPolling = startHeadPolling(t.deps);
+        t.advance(hiddenMs);
+        t.setVisible(true);
+        expect(t.fetchHead, `${hiddenMs} ms`).toHaveBeenCalledTimes(1);
+        stopProbe();
+        stopPolling();
+      }
+    });
+  });
+});
+
+describe("NewClustersPill -- probes a stale list on mount (h201-timeline-1, source guard)", () => {
+  const source = readFileSync(resolve(__dirname, "new-clusters-pill.tsx"), "utf8");
+  const code = stripComments(source);
+
+  /** The poller effect: from `useEffect(() => {` that builds the head poller up to its `}, []);`. */
+  const pollerEffect = /useEffect\(\(\)\s*=>\s*\{\s*const deps[^=]*=\s*\{([\s\S]*?)\n  \}, \[\]\);/.exec(code)?.[1] ?? "";
+
+  it("finds the poller effect (so the guards below are not vacuous)", () => {
+    expect(pollerEffect).not.toBe("");
+    expect(pollerEffect).toMatch(/startHeadPolling\(\s*deps\s*\)/);
+  });
+
+  it("starts the probe in that same effect, from the same deps (one onRows, one fetch), judged against the page's newest row", () => {
+    expect(pollerEffect).toMatch(/startStaleProbe\(\s*deps\s*,\s*latest\.current\.newestPublished\s*\)/);
+  });
+
+  it("stops both the probe and the poller on cleanup", () => {
+    const cleanup = /return\s*\(\)\s*=>\s*\{([^}]*)\}/.exec(pollerEffect)?.[1] ?? "";
+    expect(cleanup).toMatch(/stopProbe\(\)/);
+    expect(cleanup).toMatch(/stopPolling\(\)/);
+  });
+
+  it("the probe reads the clock only through the injected readClock dependency", () => {
+    expect(pollerEffect).toMatch(/now:\s*readClock\b/);
+    expect(code.match(/Date\.now/g) ?? []).toHaveLength(1);
+  });
+
+  it("adds no refresh path: the probe only feeds the count, the click still owns router.refresh()", () => {
+    const probe = /export function startStaleProbe[\s\S]*?\n\}\n/.exec(code)?.[0] ?? "";
+    expect(probe).not.toBe("");
+    expect(probe).not.toMatch(/router|refresh|startTransition/);
+    expect(code.match(/router\.refresh\(\)/g) ?? []).toHaveLength(2);
+  });
+
+  it("changes no caching config: the head URL keeps its constant, query-free key", () => {
+    expect(code.match(/\/api\/timeline\/head/g) ?? []).toHaveLength(1);
+    expect(code).not.toMatch(/\/api\/timeline\/head\?/);
   });
 });
