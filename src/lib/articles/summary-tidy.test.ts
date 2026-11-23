@@ -28,6 +28,20 @@ const CHANGES: ReadonlyArray<readonly [string, string]> = [
   ["dedi…Ancak", "dedi… Ancak"],
   // Trailing call-to-action: the dots stay, only the CTA goes.
   ["Aletli İniş Sistemi (ILS)...Devamı için tıklayınız", "Aletli İniş Sistemi (ILS)..."],
+  // A feed that appended "..." behind a full stop (Turkuvaz: Yeni Asır, Sabah, A Haber; h208-feeds-1):
+  // the CTA goes, and the full stop plus the dots become one full stop.
+  [
+    "İçişleri Bakanı Mustafa Çiftçi, Türkiye'nin 7 Ekim 2023'ten bu yana Gazze'ye 14 uçak, 21 gemi ve yerelden temin yoluyla olmak üzere toplam 111 bin 904 ton insani yardım malzemesi ulaştırdığını açıkladı....Devamı için tıklayınız",
+    "İçişleri Bakanı Mustafa Çiftçi, Türkiye'nin 7 Ekim 2023'ten bu yana Gazze'ye 14 uçak, 21 gemi ve yerelden temin yoluyla olmak üzere toplam 111 bin 904 ton insani yardım malzemesi ulaştırdığını açıkladı.",
+  ],
+  [
+    "Bakan Yılmaz, yeni düzenlemenin kurumlara bildirildiğini ve sürecin dün resmen sona erdiğini söyledi, takvim geçti.…Devamı için tıklayınız",
+    "Bakan Yılmaz, yeni düzenlemenin kurumlara bildirildiğini ve sürecin dün resmen sona erdiğini söyledi, takvim geçti.",
+  ],
+  [
+    "ABD'li şirket Türkiye'deki piyasası faaliyetlerini geçici olarak durdurdu....",
+    "ABD'li şirket Türkiye'deki piyasası faaliyetlerini geçici olarak durdurdu.",
+  ],
   ["Toplantı yapıldı. HABERİN DEVAMI İÇİN TIKLAYIN", "Toplantı yapıldı."],
   // A capitalised CTA after a plain space (no punctuation boundary).
   ["kişi yaralandı Devamı için tıklayınız", "kişi yaralandı"],
@@ -5540,6 +5554,16 @@ describe("isCtaFeedCut (h122-ozet-3)", () => {
     expect(isCtaFeedCut(`${"a".repeat(100)}...${CTA}`)).toBe(true);
   });
 
+  it("h208-feeds-1: a full stop in front of the dots is still no feed cut, and tidy ends on ONE full stop", () => {
+    const raw = `${LONG.slice(0, -4)}geçti....${CTA}`;
+    expect(isCtaFeedCut(raw)).toBe(false);
+    const out = tidySummaryText(raw);
+    expect(out.endsWith("geçti.")).toBe(true);
+    expect(out.endsWith("....")).toBe(false);
+    expect(out).toBe(`${LONG.slice(0, -4)}geçti.`);
+    expect(tidySummaryText(out)).toBe(out);
+  });
+
   it("never throws on a non-string", () => {
     expect(isCtaFeedCut(undefined as unknown as string)).toBe(false);
     expect(isCtaFeedCut(null as unknown as string)).toBe(false);
@@ -5556,6 +5580,112 @@ describe("isCtaFeedCut (h122-ozet-3)", () => {
     ["ellipsis characters", rep("…", "a", "Devamı için tıklayınız"), 200_000],
   ] as Array<[string, Gen, number]>)("linear time: %s", (_name, gen, n) => {
     expectLinear(gen, (s) => isCtaFeedCut(s), { n, ceilingMs: 2_000 });
+    expectLinear(gen, (s) => tidySummaryText(s), { n, ceilingMs: 4_000 });
+  });
+});
+
+// h208-feeds-1: Turkuvaz feeds (Yeni Asır, Sabah, A Haber) append "..." to a description that already ends
+// in a full stop, so a whole sentence ends "açıkladı....". It is no feed cut (the character in front of the
+// dots is a full stop, see isCtaFeedCut), so the last step of tidySummaryText makes it one full stop.
+describe("tidySummaryText: a full stop plus the feed's '...' is one full stop (h208-feeds-1)", () => {
+  const BODY = "İçişleri Bakanı Mustafa Çiftçi, Türkiye'nin Gazze'ye toplam 111 bin 904 ton insani yardım malzemesi ulaştırdığını açıkladı";
+
+  // [label, input, expected]
+  const COLLAPSES: ReadonlyArray<readonly [string, string, string]> = [
+    ["four dots and the CTA (cluster ad4b6226)", `${BODY}....Devamı için tıklayınız`, `${BODY}.`],
+    ["a full stop and the ellipsis character, then the CTA", `${BODY}.…Devamı için tıklayınız`, `${BODY}.`],
+    ["four dots, no CTA", `${BODY}....`, `${BODY}.`],
+    ["a full stop and the ellipsis character, no CTA", `${BODY}.…`, `${BODY}.`],
+    ["blanks between the dots and the CTA", `${BODY}.... Devamı için tıklayınız`, `${BODY}.`],
+    ["a sentence-style CTA: an editor's teaser (af529f2a)", `${BODY}.... İşte tüm detaylar!`, `${BODY}.`],
+    ["trailing blanks and a line break behind the dots", `${BODY}....  \n`, `${BODY}.`],
+    ["a closing quote in front of the dots", `${BODY}, "yardım sürecek"....`, `${BODY}, "yardım sürecek".`],
+  ];
+
+  it.each(COLLAPSES)("collapses: %s", (_label, input, expected) => {
+    const out = tidySummaryText(input);
+    expect(out).toBe(expected);
+    expect(tidySummaryText(out), "a fixed point").toBe(out);
+  });
+
+  // Exactly four dots: every other run, and a run that is not at the end, is the outlet's or the author's own.
+  // [label, input, expected]: a pin of what tidySummaryText did before this step and still does.
+  const STAYS: ReadonlyArray<readonly [string, string, string]> = [
+    ["three dots behind a parenthesis, then the CTA (the outlet's own ellipsis)", "(ILS)...Devamı için tıklayınız", "(ILS)..."],
+    ["three dots behind a letter", `${BODY}...`, `${BODY}...`],
+    ["an exclamation mark and three dots", "Takım maçı kazandı ve kupayı kaldırdı geçti!...", "Takım maçı kazandı ve kupayı kaldırdı geçti!..."],
+    ["five dots", `${BODY}.....`, `${BODY}.....`],
+    ["six dots (fefb05a2)", "Hangi birini sayalım? Mehmet Keçeciler......", "Hangi birini sayalım? Mehmet Keçeciler......"],
+    ["four dots in the middle of the text", `${BODY}....Ayrıntılar yarın duyurulacak`, `${BODY}....Ayrıntılar yarın duyurulacak`],
+    ["a full stop, the ellipsis character and a word after it", `${BODY}.…Ayrıntılar yarın duyurulacak`, `${BODY}.…Ayrıntılar yarın duyurulacak`],
+    ["the ellipsis character alone", `${BODY}…`, `${BODY}…`],
+    ["a full stop alone", `${BODY}.`, `${BODY}.`],
+    ["two full stops and the ellipsis character: a longer run", `${BODY}..…`, `${BODY}..…`],
+    ["three dots and the ellipsis character: a longer run", `${BODY}...…`, `${BODY}...…`],
+    ["a question mark in front of four dots: no sentence-ending full stop", `${BODY}?....`, `${BODY}?....`],
+    ["an exclamation mark in front of four dots", `${BODY}!....`, `${BODY}!....`],
+    ["a blank in front of four dots", `${BODY} ....`, `${BODY} ....`],
+    ["only four dots: nothing in front of them", "....", "...."],
+    ["only four dots and a CTA", "....Devamı için tıklayınız", "...."],
+    // A full stop that is no sentence end: the word in front of the run is not a finite verb, or the dot is an
+    // abbreviation's or an initial's. The feed's text was CUT there, so the dots stay (the CTA still goes).
+    ["a digit in front of the dots: not a finite verb", "Dolar kuru bugün güne yükselişle başladı ve 34,50....", "Dolar kuru bugün güne yükselişle başladı ve 34,50...."],
+    ["a closing parenthesis in front of the dots: not a finite verb", `${BODY} (AA)....`, `${BODY} (AA)....`],
+    [
+      "an initial before the dots, then the CTA (b50e6f93: 'U.Y.')",
+      "Bakırköy Cumhuriyet Başsavcılığı'nın yürüttüğü soruşturma kapsamında, Adalet Bakanı Akın Gürlek'in eşine yönelik eylem hazırlığında oldukları iddia edilen iki şüpheli tutuklandı. Gözaltına alınan U.Y....Devamı için tıklayınız",
+      "Bakırköy Cumhuriyet Başsavcılığı'nın yürüttüğü soruşturma kapsamında, Adalet Bakanı Akın Gürlek'in eşine yönelik eylem hazırlığında oldukları iddia edilen iki şüpheli tutuklandı. Gözaltına alınan U.Y....",
+    ],
+    [
+      "two initials before the dots, then the CTA (da7b4898: 'B.Ö.')",
+      "Antalya'nın Manavgat ilçesinde tutuklu CHP'li eski belediye başkanı Şükrü Sözen dönemine ilişkin yürütülen soruşturma kapsamında muhasebe müdürü B.Ö., eski zabıta müdürü Turgay Şalgam ile iş insanı B.Ö....Devamı için tıklayınız",
+      "Antalya'nın Manavgat ilçesinde tutuklu CHP'li eski belediye başkanı Şükrü Sözen dönemine ilişkin yürütülen soruşturma kapsamında muhasebe müdürü B.Ö., eski zabıta müdürü Turgay Şalgam ile iş insanı B.Ö....",
+    ],
+    [
+      "a title abbreviation before the dots (c0ab91b8: 'Prof.')",
+      "160 kişilik Parti Meclisi’nde ekonomist Kerim Rota, yapay zeka uzmanı Cem Say ekonomist Serkan Özcan, Kadem Özbay, Prof....",
+      "160 kişilik Parti Meclisi’nde ekonomist Kerim Rota, yapay zeka uzmanı Cem Say ekonomist Serkan Özcan, Kadem Özbay, Prof....",
+    ],
+    [
+      "a name before the dots, then the CTA (cefd0f6d: 'Bakan Göktaş')",
+      "Aile ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş, 'Güçlü Aile Mutlu Gelecek Projesi' Kapanış Programı'nda konuştu. Ailede kurulan dilin çocuğun hayatının temeli olduğunu vurgulayan Bakan Göktaş....Devamı için tıklayınız",
+      "Aile ve Sosyal Hizmetler Bakanı Mahinur Özdemir Göktaş, 'Güçlü Aile Mutlu Gelecek Projesi' Kapanış Programı'nda konuştu. Ailede kurulan dilin çocuğun hayatının temeli olduğunu vurgulayan Bakan Göktaş....",
+    ],
+    // correctness-2: only a letter, a digit or a closing mark may stand in front of the run. A comma, colon,
+    // semicolon or dash would leave ",." / ":." / ";." / "-." behind.
+    ["a comma in front of four dots", `${BODY},....`, `${BODY},....`],
+    ["a colon in front of four dots", `${BODY}:....`, `${BODY}:....`],
+    ["a semicolon in front of four dots", `${BODY};....`, `${BODY};....`],
+    ["a hyphen in front of four dots", `${BODY}-....`, `${BODY}-....`],
+    ["a lead-in colon in front of four dots", "Bakan şunları söyledi:....", "Bakan şunları söyledi:...."],
+    ["a lead-in comma in front of four dots", "Toplantıda konuşan bakan dedi ki,....", "Toplantıda konuşan bakan dedi ki,...."],
+    ["an empty text", "", ""],
+  ];
+
+  it.each(STAYS)("leaves alone: %s", (_label, input, expected) => {
+    const out = tidySummaryText(input);
+    expect(out).toBe(expected);
+    expect(tidySummaryText(out), "a fixed point").toBe(out);
+  });
+
+  it("a real Turkuvaz summary now ends on one full stop and nothing else changed", () => {
+    const stored =
+      "İçişleri Bakanı Mustafa Çiftçi, Türkiye'nin 7 Ekim 2023'ten bu yana Gazze'ye 14 uçak, 21 gemi ve yerelden temin yoluyla olmak üzere toplam 111 bin 904 ton insani yardım malzemesi ulaştırdığını açıkladı....Devamı için tıklayınız";
+    const out = tidySummaryText(stored);
+    expect(out.endsWith("ulaştırdığını açıkladı.")).toBe(true);
+    expect(out).toBe(stored.replace("....Devamı için tıklayınız", "."));
+  });
+
+  // 200,000 characters; ceiling 4000 ms (CPU time over a size ladder, tests/_helpers/linear-time.ts).
+  it.each([
+    ["a long run of dots", rep(".", "a", ""), 200_000],
+    ["a long run of dots and a CTA", rep(".", "a", "Devamı için tıklayınız"), 200_000],
+    ["'a....' repeated", rep("a....", "", ""), 200_000],
+    ["'a.…' repeated", rep("a.…", "", ""), 200_000],
+    ["a long run of blanks behind four dots", rep(" ", "a....", ""), 200_000],
+    ["a long run of blanks in front of four dots", rep(" ", "a", "...."), 200_000],
+    ["a long text that reaches the finite-verb check", rep("kelime ", "", "açıkladı...."), 200_000],
+  ] as Array<[string, Gen, number]>)("linear time: %s", (_name, gen, n) => {
     expectLinear(gen, (s) => tidySummaryText(s), { n, ceilingMs: 4_000 });
   });
 });

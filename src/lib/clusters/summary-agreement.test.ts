@@ -678,6 +678,24 @@ describe("seedDisqualified (h34-reader-4)", () => {
       const mid = "Bakan açıklamasında ... diye konuştu ve ardından yeni kararları duyurdu.";
       expect(seedDisqualified(mid, mid)).toBeNull();
     });
+
+    // h208-feeds-1: the tidy step turns "<sentence>...." into "<sentence>." only when a finite verb ends the
+    // sentence. A cut ("Gözaltına alınan U.Y....") keeps its dots, so it is still seen as a cut and a
+    // member with a whole text can replace the seed.
+    it("b50e6f93: a Turkuvaz cut after an initial keeps its four dots, so the seed is a stub", () => {
+      const raw =
+        "Bakırköy Cumhuriyet Başsavcılığı'nın yürüttüğü soruşturma kapsamında, Adalet Bakanı Akın Gürlek'in eşine yönelik eylem hazırlığında oldukları iddia edilen iki şüpheli tutuklandı. Gözaltına alınan U.Y....Devamı için tıklayınız";
+      const shown = tidySummaryText(raw);
+      expect(shown.endsWith("U.Y....")).toBe(true);
+      expect(seedDisqualified(raw, shown)).toBe("stub");
+    });
+
+    it("a whole sentence that the feed gave a '...' ends on one full stop and is no stub", () => {
+      const raw = "Bakan bugün yeni düzenlemeyi kamuoyuna açıkladı....Devamı için tıklayınız";
+      const shown = tidySummaryText(raw);
+      expect(shown).toBe("Bakan bugün yeni düzenlemeyi kamuoyuna açıkladı.");
+      expect(seedDisqualified(raw, shown)).toBeNull();
+    });
   });
 
   describe("not a stub: the cut sentence still has its verb", () => {
