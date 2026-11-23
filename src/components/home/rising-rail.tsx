@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { dayLabelTr } from "@/lib/trends/day-label";
 import { risingHint, type RisingItem } from "@/lib/trends/rising";
 import { linkRisingHubs } from "@/lib/trends/rising-links";
 import { getRisingEntities } from "@/lib/trends/rising-query";
@@ -12,8 +13,11 @@ import { getRisingEntities } from "@/lib/trends/rising-query";
 // cache entry /trends reads (both pages show identical numbers inside one cache window) and
 // linkRisingHubs settles each href the way /trends does (a /gundem hub when it is indexable, the
 // /?q= search otherwise). Only the first RAIL_MAX rows are linked, so at most that many hubs are
-// read. The ranked day and the count stay on /trends: the entry is served up to an hour past
-// Istanbul midnight, so the rail names no day (never "Bugün") and prints no count.
+// read. The count stays on /trends. The heading names the ranked day as an absolute date ("22 Kasım"),
+// like /trends, because computeRising falls back to yesterday when today has no riser: without the
+// date the rail would show yesterday's multiples as current, for up to a whole Istanbul day. The date is
+// built from RisingResult.day itself (dayLabelTr, pure), never "Bugün" or "Dün": the entry is served up
+// to an hour past Istanbul midnight, and an absolute date cannot go stale inside it. h208-home-1.
 //
 // Two pieces. loadRisingRail does the reads and RisingRail awaits its promise and paints. HomeFeed
 // calls loadRisingRail BEFORE it awaits the feed read and hands the promise down as `data`: a rail
@@ -44,35 +48,41 @@ export const RISING_RAIL_MAX = 6;
 const CHIP_CLASS =
   "inline-flex items-center gap-1.5 min-h-6 max-sm:min-h-11 rounded-full border border-border/60 bg-muted/50 px-3 text-xs font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
+/** What the rail paints: the ranked Istanbul day (YYYY-MM-DD, as the shared entry holds it) and its linked rows. */
+export type RisingRailData = { day: string; items: RisingItem[] };
+
 /**
- * The rail's rows: the rising list of the shared cached entry, cut to RISING_RAIL_MAX and linked
- * (a hub href or the /?q= search), or null when there is nothing to show. Never rejects: a thrown
- * read (the rising read or a hub read) is logged once and is null. The read starts when this is
- * called, so call it as early as the page can and hand the promise to RisingRail.
+ * The rail's data: the ranked day and the rising list of the shared cached entry, cut to
+ * RISING_RAIL_MAX and linked (a hub href or the /?q= search), or null when there is nothing to show.
+ * The day is RisingResult.day passed through unchanged. Never rejects: a thrown read (the rising read
+ * or a hub read) is logged once and is null. The read starts when this is called, so call it as early
+ * as the page can and hand the promise to RisingRail.
  */
-export async function loadRisingRail(): Promise<RisingItem[] | null> {
+export async function loadRisingRail(): Promise<RisingRailData | null> {
   try {
     const read = await getRisingEntities();
     // `!read`, not `=== null`: a missing answer is "nothing to show", never a TypeError to log.
     if (!read || read.status !== "ok" || read.items.length === 0) return null;
     const linked = await linkRisingHubs({ ...read, items: read.items.slice(0, RISING_RAIL_MAX) });
     if (linked === null || linked.status !== "ok" || linked.items.length === 0) return null;
-    return linked.items;
+    return { day: read.day, items: linked.items };
   } catch (err) {
     console.warn("[home] rising rail unavailable:", err);
     return null;
   }
 }
 
-export async function RisingRail({ data }: { data: Promise<RisingItem[] | null> }) {
-  const items = await data;
-  if (items === null || items.length === 0) return null;
+export async function RisingRail({ data }: { data: Promise<RisingRailData | null> }) {
+  const rail = await data;
+  if (rail === null || rail.items.length === 0) return null;
+  const { day, items } = rail;
 
   return (
     <section aria-labelledby="yukselen-konular-baslik" className="space-y-3">
       <div className="flex items-center gap-3">
         <h2 id="yukselen-konular-baslik" className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Yükselen konular
+          <span className="font-normal text-muted-foreground">{` · ${dayLabelTr(day)}`}</span>
         </h2>
         <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
       </div>

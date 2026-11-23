@@ -64,6 +64,11 @@ import { endsWithFiniteVerb } from "./finite-verb";
 //     text is backed off to the last sentence end, or hidden (h164-summaries-1)
 //   - a bare URL line, and the byline stub it leaves ("Av. Baran Can KAYA
 //     yazdı...\n\nhttps://www.hukukihaber.net/..."; h164-summaries-2)
+//   - a full stop that a feed's "..." follows ("... açıkladı....Devamı için
+//     tıklayınız", Turkuvaz: Yeni Asır, Sabah, A Haber; h208-feeds-1): the four
+//     dots, or ".…", become one full stop, but only when that full stop ends a
+//     sentence (a finite verb stands in front of it, not an abbreviation, an
+//     initial, an ordinal or a name: "Gözaltına alınan U.Y...." is a cut and stays)
 //   - double spaces
 //
 // The ingest side must not change (content_hash and the corpus-equality test
@@ -1891,7 +1896,15 @@ export function stripLeadingStyleRules(description: string): string {
  *      ({@link trimDanglingLeadIn}, h164-summaries-1: "... Göktaş 2027 yılı bütçe
  *      sunumunda şunları söyledi:"). A byline stub that a dropped URL line left
  *      ("Av. Baran Can KAYA yazdı...", {@link isBylineStub}) is "" too (step 5b,
- *      h164-summaries-2).
+ *      h164-summaries-2);
+ *   8. a full stop followed by the feed's "..." ("açıkladı....Devamı için tıklayınız"
+ *      once the CTA is peeled, or ".…") becomes one full stop
+ *      ({@link collapseFullStopEllipsis}, h208-feeds-1). Only exactly four dots, or a
+ *      full stop and "…", at the very end, behind a letter, a digit or a closing
+ *      mark, and only when the full stop ends a sentence: the word in front of it is a
+ *      finite verb, not an abbreviation, an initial, an ordinal or a name ("U.Y....",
+ *      "Prof....", "Bakan Göktaş...." are cuts and keep their dots). "(ILS)...",
+ *      "geçti!...", a longer run and four dots in the middle stay.
  *
  * Step 0 repairs a clamp with {@link cutAppendedTicker} first: foreign text is
  * never kept, so a clamped text that holds a ticker line ends where the ticker
@@ -1918,7 +1931,59 @@ export function stripLeadingStyleRules(description: string): string {
 export function tidySummaryText(s: string): string {
   // 7. A text that ends in a lead-in (":" / ";") is backed off to the last sentence end, or
   //    hidden (h164-summaries-1), on the final text, after everything else has had its say.
-  return trimDanglingLeadIn(tidyBeforeLeadIn(s));
+  // 8. A full stop that a feed's "..." follows ("açıkladı....") is one full stop (h208-feeds-1),
+  //    the very last step: it only looks at the end of the finished text.
+  return collapseFullStopEllipsis(trimDanglingLeadIn(tidyBeforeLeadIn(s)));
+}
+
+/**
+ * Step 8 of {@link tidySummaryText} (h208-feeds-1). Turkuvaz feeds (Yeni Asır, Sabah, A Haber)
+ * append "..." to a description that already ends in a full stop, so a whole sentence ends
+ * "açıkladı...." (four dots), or ".…" when the feed used the ellipsis character. That is no feed
+ * cut ({@link isCtaFeedCut} is false when a full stop stands in front of the dots), and the CTA
+ * peel leaves the run behind, so the page showed a four-dot run.
+ *
+ * When the text, blanks at its end ignored, ends in exactly four dots ("....") or in ".…", that
+ * run becomes one "." and the blanks go, but only when that full stop ends a sentence. Only
+ * exactly that run, behind a letter, a digit or a closing mark (a quote or a bracket), and not at
+ * the very start of the text:
+ *   - a three-dot ellipsis ("(ILS)...", "geçti!...") and a longer run ("Keçeciler......",
+ *     "..…") are the outlet's or the author's own and stay as they are;
+ *   - "geçti ....", "geçti?....", "açıkladı,...." (a comma, colon, semicolon or dash in front)
+ *     and "...." alone have no sentence-ending full stop in them, so the run is left alone
+ *     rather than turned into " ." or "?." or ",.";
+ *   - the full stop ends a sentence only when the word in front of it is a finite verb
+ *     ({@link endsWithFiniteVerb}) and the dot is not an abbreviation's, an initial's or an
+ *     ordinal's ({@link isNonSentenceDot}). "Gözaltına alınan U.Y....", "Kadem Özbay, Prof....",
+ *     "Bakan Göktaş...." and "başladı ve 34,50...." are feed cuts: their dots stay, so a cut
+ *     is not turned into a finished sentence;
+ *   - four dots in the middle of the text are not looked at.
+ * Any other text comes back as the SAME string. Constant work after the scan of the trailing
+ * blanks, plus the linear {@link endsWithFiniteVerb} check, so linear.
+ */
+function collapseFullStopEllipsis(s: string): string {
+  let end = s.length;
+  while (end > 0 && isBlankChar(s.charAt(end - 1))) end--;
+  let runStart: number;
+  if (end >= 4 && s.startsWith("....", end - 4)) {
+    runStart = end - 4;
+  } else if (end >= 2 && s.charAt(end - 1) === "…" && s.charAt(end - 2) === ".") {
+    runStart = end - 2;
+  } else {
+    return s;
+  }
+  // A character must stand in front of the run, and it must be a letter, a digit or a closing mark:
+  // a sentence mark, a blank, a comma, a colon, a semicolon or a dash would leave "?.", " ." or ",." behind.
+  if (runStart === 0) return s;
+  const before = s.charAt(runStart - 1);
+  if (!(isLetterOrDigit(before) || CLOSERS.has(before))) return s;
+  // The full stop must end a sentence. s.charAt(runStart) is the run's first ".", so an initial
+  // ("U.Y"), a title ("Prof") or an ordinal in front of it is caught here; a name ("Bakan Göktaş"), a
+  // number ("34,50") or an agency tag ("(AA)") is no finite verb. In both cases the feed cut the text
+  // and the dots stay.
+  if (isNonSentenceDot(s, runStart)) return s;
+  if (!endsWithFiniteVerb(s.slice(0, runStart))) return s;
+  return s.slice(0, runStart) + ".";
 }
 
 /** Steps pre to 6 of {@link tidySummaryText}: the tidied text before the lead-in back-off. */

@@ -30,7 +30,7 @@ vi.mock("@/lib/entities/entity-hub-query", () => ({
 
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { getRisingEntities } from "@/lib/trends/rising-query";
-import { RisingRail, loadRisingRail } from "./rising-rail";
+import { RisingRail, loadRisingRail, type RisingRailData } from "./rising-rail";
 
 type Elementish = { type?: unknown; props?: Record<string, unknown> };
 
@@ -158,14 +158,34 @@ describe("loadRisingRail", () => {
     mockRising = ok(eight());
     allHubsIndexable(eight());
 
-    const items = await loadRisingRail();
+    const data = await loadRisingRail();
 
-    expect(items).not.toBeNull();
-    expect(items!.map((i) => i.href)).toEqual(Array.from({ length: 6 }, (_, i) => `/gundem/k${i}`));
+    expect(data).not.toBeNull();
+    expect(data!.items.map((i) => i.href)).toEqual(Array.from({ length: 6 }, (_, i) => `/gundem/k${i}`));
     expect(getRisingEntities).toHaveBeenCalledTimes(1);
     expect(vi.mocked(getEntityHub).mock.calls.map((c) => c[0])).toEqual(
       Array.from({ length: 6 }, (_, i) => `k${i}`),
     );
+  });
+
+  it("resolves { day, items } with the ranked day of the shared entry passed through unchanged (h208-home-1)", async () => {
+    mockRising = ok([item("msb", "MSB"), item("chp", "CHP")], "2026-11-22");
+    allHubsIndexable([item("msb", "MSB"), item("chp", "CHP")]);
+
+    const data = await loadRisingRail();
+
+    expect(data).not.toBeNull();
+    expect(Object.keys(data!).sort()).toEqual(["day", "items"]);
+    expect(data!.day).toBe("2026-11-22");
+    expect(data!.items.map((i) => i.key)).toEqual(["msb", "chp"]);
+  });
+
+  it("passes the day through whatever it is: no clock read, no relative word, no reformatting", async () => {
+    for (const day of ["2026-11-23", "2026-01-05", "not-a-day"]) {
+      mockRising = ok([item("msb", "MSB")], day);
+      allHubsIndexable([item("msb", "MSB")]);
+      expect((await loadRisingRail())?.day).toBe(day);
+    }
   });
 
   it("resolves null, and reads no hub, for a failed read, thin history or no rows", async () => {
@@ -206,21 +226,21 @@ describe("loadRisingRail", () => {
 describe("RisingRail: takes its rows from the data prop", () => {
   it("renders nothing for null and for an empty list, without reading anything itself", async () => {
     expect(await RisingRail({ data: Promise.resolve(null) })).toBeNull();
-    expect(await RisingRail({ data: Promise.resolve([]) })).toBeNull();
+    expect(await RisingRail({ data: Promise.resolve({ day: "2026-11-22", items: [] }) })).toBeNull();
     expect(getRisingEntities).not.toHaveBeenCalled();
     expect(getEntityHub).not.toHaveBeenCalled();
   });
 
   it("renders the rows it is handed, in order, plus 'Tümü'", async () => {
     const rows = [item("msb", "MSB"), item("chp", "CHP")];
-    const all = links(await RisingRail({ data: Promise.resolve(rows) }));
+    const all = links(await RisingRail({ data: Promise.resolve({ day: "2026-11-22", items: rows }) }));
     expect(all.map((l) => l.props?.href)).toEqual(["/gundem/msb", "/gundem/chp", "/trends"]);
     expect(getRisingEntities).not.toHaveBeenCalled();
   });
 
   it("waits for the promise: a rail whose data is still pending has not rendered", async () => {
-    let release: (v: RisingItem[] | null) => void = () => {};
-    const data = new Promise<RisingItem[] | null>((resolve) => {
+    let release: (v: RisingRailData | null) => void = () => {};
+    const data = new Promise<RisingRailData | null>((resolve) => {
       release = resolve;
     });
     let settled = false;
@@ -230,7 +250,7 @@ describe("RisingRail: takes its rows from the data prop", () => {
     });
     await new Promise((r) => setTimeout(r, 0));
     expect(settled).toBe(false);
-    release([item("msb", "MSB")]);
+    release({ day: "2026-11-22", items: [item("msb", "MSB")] });
     expect(await pending).not.toBeNull();
   });
 });
@@ -246,7 +266,8 @@ describe("RisingRail: the landmark", () => {
     expect(sections).toHaveLength(1);
     const headings = collectElements(tree).filter((el) => el.type === "h2");
     expect(headings).toHaveLength(1);
-    expect(textOf(headings[0])).toBe("Yükselen konular");
+    // The h2 names the region and now also the ranked day (h208-home-1): the label first, the date after it.
+    expect(textOf(headings[0]).startsWith("Yükselen konular")).toBe(true);
     // The heading names the region: aria-labelledby points at the h2's own id, and there is no aria-label beside it.
     expect(headings[0]!.props?.id).toBe("yukselen-konular-baslik");
     expect(sections[0]!.props?.["aria-labelledby"]).toBe(headings[0]!.props?.id);
@@ -376,7 +397,7 @@ describe("RisingRail: the chips", () => {
     expect(html.includes("&lt;b&gt;x&lt;/b&gt;")).toBe(true);
   });
 
-  it("names no day and no count: a cached result is served past Istanbul midnight, so no 'Bugün' or 'Dün'", async () => {
+  it("names no relative day and no count: a cached result is served past Istanbul midnight, so no 'Bugün' or 'Dün'", async () => {
     mockRising = ok([item("msb", "MSB", { count: 1234 })]);
     allHubsIndexable([item("msb", "MSB")]);
 
@@ -386,6 +407,82 @@ describe("RisingRail: the chips", () => {
     expect(html.includes("Dün")).toBe(false);
     expect(html.includes("1.234")).toBe(false);
     expect(html.includes("1234")).toBe(false);
+  });
+});
+
+describe("RisingRail: the ranked day (h208-home-1)", () => {
+  // computeRising falls back to yesterday when today has no riser, so the rail can show yesterday's
+  // multiples as the current ones. The heading names the ranked day as an absolute date, like /trends.
+  const rows = [item("msb", "MSB"), item("chp", "CHP")];
+
+  async function html(day: string): Promise<string> {
+    mockRising = ok(rows, day);
+    allHubsIndexable(rows);
+    return renderToStaticMarkup((await rail()) as ReactNode);
+  }
+
+  it("prints yesterday's key as an absolute Turkish date: 2026-11-22 is '22 Kasım'", async () => {
+    expect(await html("2026-11-22")).toContain("22 Kasım");
+  });
+
+  it("prints today's key the same way: 2026-11-23 is '23 Kasım'", async () => {
+    const out = await html("2026-11-23");
+    expect(out).toContain("23 Kasım");
+    expect(out).not.toContain("22 Kasım");
+  });
+
+  it("takes the label from the day of the data, not from a clock: the same rows under another day print that day", async () => {
+    expect(await html("2026-03-05")).toContain("5 Mart");
+    expect(await html("2026-12-31")).toContain("31 Aralık");
+  });
+
+  it("puts the date inside the h2 (the region's accessible name), once, after the label", async () => {
+    mockRising = ok(rows, "2026-11-22");
+    allHubsIndexable(rows);
+
+    const tree = await rail();
+
+    const headings = collectElements(tree).filter((el) => el.type === "h2");
+    expect(headings).toHaveLength(1);
+    expect(headings[0]!.props?.id).toBe("yukselen-konular-baslik");
+    expect(textOf(headings[0])).toBe("Yükselen konular · 22 Kasım");
+    const section = collectElements(tree).find((el) => el.type === "section")!;
+    expect(section.props?.["aria-labelledby"]).toBe("yukselen-konular-baslik");
+    expect(textOf(section).split("22 Kasım")).toHaveLength(2);
+  });
+
+  it("the served h2 holds the date in a muted span, with full tokens and literal classes", async () => {
+    const out = await html("2026-11-22");
+
+    const h2 = /<h2 id="yukselen-konular-baslik"[^>]*>(.*?)<\/h2>/.exec(out);
+    expect(h2).not.toBeNull();
+    expect(h2![1]).toContain("Yükselen konular");
+    expect(h2![1]).toContain("22 Kasım");
+    expect(/<span class="[^"]*\btext-muted-foreground\b[^"]*"> · 22 Kasım<\/span>/.test(h2![1]!)).toBe(true);
+    expect(/\btext-(?:muted-foreground|brand)\/\d+/.test(out)).toBe(false);
+  });
+
+  it("never says 'Bugün' or 'Dün', whichever day is ranked, and prints no count", async () => {
+    for (const day of ["2026-11-22", "2026-11-23"]) {
+      const out = await html(day);
+      expect(out.includes("Bugün")).toBe(false);
+      expect(out.includes("Dün")).toBe(false);
+      expect(out.includes("15 haber")).toBe(false);
+    }
+  });
+
+  it("'Tümü' and the chips do not carry the date: only the heading names the day", async () => {
+    mockRising = ok(rows, "2026-11-22");
+    allHubsIndexable(rows);
+
+    for (const l of links(await rail())) expect(textOf(l).includes("Kasım")).toBe(false);
+  });
+
+  it("renders no date, and no heading, when there is nothing to show", async () => {
+    mockRising = ok([], "2026-11-22");
+    expect(await rail()).toBeNull();
+    mockRising = { status: "insufficient" };
+    expect(await rail()).toBeNull();
   });
 });
 
