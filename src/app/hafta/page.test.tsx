@@ -55,6 +55,13 @@ const mocks = vi.hoisted(() => ({
   clusters: null as { rows: unknown[]; truncated: boolean; asOfMs?: number } | null,
   /** Every (rows, health, nowMs) call the page made to summariseWeek. */
   summariseCalls: [] as unknown[][],
+  /** What getWeeklyWireSignals resolves (null = the member read failed). */
+  wireSignals: null as Record<
+    string,
+    { effectiveArticleCount: number; memberCount: number }
+  > | null,
+  /** Every id list the page asked getWeeklyWireSignals about. */
+  wireCalls: [] as string[][],
   labelChanges: null as
     | Array<{
         slug: string;
@@ -93,6 +100,15 @@ vi.mock("@/lib/weekly/weekly-query", () => ({
   summariseWeek: (...args: unknown[]) => {
     mocks.summariseCalls.push(args);
     return mocks.summary;
+  },
+}));
+
+// h208-roadmap-1: the bounded member read behind the wire count. weekly-wire.ts
+// (the pure ids / attach steps) stays real, so the page's wiring is exercised.
+vi.mock("@/lib/weekly/weekly-wire-query", () => ({
+  getWeeklyWireSignals: (ids: string[]) => {
+    mocks.wireCalls.push(ids);
+    return Promise.resolve(mocks.wireSignals);
   },
 }));
 
@@ -238,6 +254,8 @@ const FULL_SUMMARY: Summary = {
 
 beforeEach(() => {
   mocks.summariseCalls = [];
+  mocks.wireSignals = null;
+  mocks.wireCalls = [];
   mocks.clusters = { rows: [{ id: "cl-1" }], truncated: false };
   mocks.labelChanges = [];
   mocks.summary = FULL_SUMMARY;
@@ -413,6 +431,50 @@ describe("WeeklyPage — data present", () => {
     expect(text).toContain("5 kaynak · 2 bölge");
     expect(hrefs).toContain("/cluster/cl-1");
     expect(hrefs).toContain("/cluster/cl-2");
+  });
+
+  // h208-roadmap-1: a wire redistribution counts its distinct texts here too.
+  describe("wire rows (h208-roadmap-1)", () => {
+    it("asks for the members of the displayed rows only, once, sorted", async () => {
+      await WeeklyPage();
+
+      expect(mocks.wireCalls).toEqual([["bs-1", "bs-2", "cl-1", "cl-2"]]);
+    });
+
+    it("prints the distinct-text count and the wire cue on a wire row, and leaves the others as they were", async () => {
+      // cl-1: 9 members voted, but they are 3 distinct texts.
+      mocks.wireSignals = { "cl-1": { effectiveArticleCount: 3, memberCount: 9 } };
+
+      const text = collectText(await WeeklyPage()).join(" ");
+
+      expect(text).toContain("3 kaynak · 9 sınıflandırılmış · 3 bölge");
+      expect(text).toContain("Ajans ağırlıklı · 9 haber, 3 farklı metin");
+      expect(text).not.toContain("9 kaynak · 3 bölge");
+      // Every other row keeps its line, and there is exactly one cue.
+      expect(text).toContain("5 kaynak · 2 bölge");
+      expect(text).toContain("Spektrumda yalnızca Muhalefet · 4 kaynak");
+      expect(text).toContain("%88 İktidar · 20 kaynak (17 sınıflandırılmış)");
+      expect(text.match(/Ajans ağırlıklı|Tek kaynaktan dağıtıldı/g) ?? []).toHaveLength(1);
+    });
+
+    it("a failed member read fails open: the page prints every row exactly as before", async () => {
+      mocks.wireSignals = null;
+
+      const text = collectText(await WeeklyPage()).join(" ");
+
+      expect(text).toContain("9 kaynak · 3 bölge");
+      expect(text).toContain("5 kaynak · 2 bölge");
+      expect(text).not.toContain("Ajans ağırlıklı");
+      expect(text).not.toContain("Tek kaynaktan dağıtıldı");
+    });
+
+    it("does not read members when there is no summary to show", async () => {
+      mocks.clusters = { rows: [], truncated: false };
+
+      await WeeklyPage();
+
+      expect(mocks.wireCalls).toEqual([]);
+    });
   });
 
   it("names the covered side of each blindspot", async () => {

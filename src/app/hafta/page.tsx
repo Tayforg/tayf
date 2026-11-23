@@ -26,6 +26,8 @@ import {
   summariseWeek,
   type WeeklyLabelChange,
 } from "@/lib/weekly/weekly-query";
+import { attachWeeklyWire, weeklyWireIds } from "@/lib/weekly/weekly-wire";
+import { getWeeklyWireSignals } from "@/lib/weekly/weekly-wire-query";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /hafta — P-07 "Medya Hava Durumu", the weekly content spine: what each
@@ -83,10 +85,20 @@ export default async function WeeklyPage() {
   const clusters = read?.rows ?? null;
   // `read.asOfMs` is the clock stamped inside the cached read: the blindspot
   // delay is measured against it, never against a clock read in this render.
-  const summary =
+  const weekSummary =
     read !== null && read.rows.length > 0
       ? summariseWeek(read.rows, health, read.asOfMs)
       : null;
+  // h208-roadmap-1: a wire redistribution counts its distinct texts here too. One
+  // bounded member read for the rows shown; a failed read (null) leaves every row
+  // exactly as summariseWeek built it.
+  const summary =
+    weekSummary === null
+      ? null
+      : attachWeeklyWire(
+          weekSummary,
+          await getWeeklyWireSignals(weeklyWireIds(weekSummary)),
+        );
 
   // The cluster read pages through the whole window and has its own ceiling.
   // Only a read that actually stopped at that ceiling is cut off (the figures

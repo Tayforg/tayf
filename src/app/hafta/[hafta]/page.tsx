@@ -31,6 +31,8 @@ import {
 import { weekArchiveRobots } from "@/lib/weekly/week-archive-robots";
 import { isArchiveWeekInRange } from "@/lib/weekly/week-key";
 import { summariseWeek } from "@/lib/weekly/weekly-query";
+import { attachWeeklyWire, weeklyWireIds } from "@/lib/weekly/weekly-wire";
+import { getWeeklyWireSignals } from "@/lib/weekly/weekly-wire-query";
 
 // /hafta/[hafta] — ISO-week permalink into the archive (owned-channels
 // Part B). /hafta itself stays the rolling trailing-7-day page; this route
@@ -130,8 +132,18 @@ export default async function WeekArchivePage({ params }: PageProps) {
   const silentCaveat = silentSourcesCaveat(silentSources);
 
   const rows = read?.rows ?? null;
-  const summary =
+  const weekSummary =
     read !== null && read.rows.length > 0 ? summariseWeek(read.rows, health, read.asOfMs) : null;
+  // h208-roadmap-1: a wire redistribution counts its distinct texts here too. One
+  // bounded member read for the rows shown; a failed read (null) leaves every row
+  // exactly as summariseWeek built it.
+  const summary =
+    weekSummary === null
+      ? null
+      : attachWeeklyWire(
+          weekSummary,
+          await getWeeklyWireSignals(weeklyWireIds(weekSummary)),
+        );
   const label = weekLabelTr(hafta);
 
   const prevKey = shiftWeek(hafta, -1);
