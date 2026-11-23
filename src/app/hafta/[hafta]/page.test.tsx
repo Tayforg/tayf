@@ -19,6 +19,13 @@ const mocks = vi.hoisted(() => ({
   summariseCalls: [] as unknown[][],
   /** Order of connection() and the week read, to pin the request-time contract. */
   order: [] as string[],
+  /** What getWeeklyWireSignals resolves (null = the member read failed). */
+  wireSignals: null as Record<
+    string,
+    { effectiveArticleCount: number; memberCount: number }
+  > | null,
+  /** Every id list the page asked getWeeklyWireSignals about. */
+  wireCalls: [] as string[][],
 }));
 
 vi.mock("next/server", () => ({
@@ -74,6 +81,15 @@ vi.mock("@/lib/weekly/weekly-query", () => ({
       ],
       blindspotSideCounts: { iktidar: 37, bagimsiz: 0, muhalefet: 9 },
     };
+  },
+}));
+
+// h208-roadmap-1: the bounded member read behind the wire count. weekly-wire.ts
+// (the pure ids / attach steps) stays real, so the page's wiring is exercised.
+vi.mock("@/lib/weekly/weekly-wire-query", () => ({
+  getWeeklyWireSignals: (ids: string[]) => {
+    mocks.wireCalls.push(ids);
+    return Promise.resolve(mocks.wireSignals);
   },
 }));
 
@@ -207,6 +223,77 @@ describe("/hafta/[hafta] source status", () => {
     expect(text).not.toContain(UNKNOWN);
     // The archive copy is unchanged: it still states the percentage basis.
     expect(text).toContain("Yüzdeler o haftanın çok kaynaklı kümelerindeki 10 kaynak kaydı");
+  });
+});
+
+// h208-roadmap-1: the week pages count a wire redistribution in distinct texts,
+// like every other surface. The page reads the members of the displayed rows
+// (current and closed weeks alike) and fails open to today's line.
+describe("/hafta/[hafta] wire rows", () => {
+  beforeAll(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  const current = weekKeyFromMs(NOW.getTime());
+  const closed = shiftWeek(current, -1) as string;
+
+  beforeEach(() => {
+    mocks.summariseCalls = [];
+    mocks.wireSignals = null;
+    mocks.wireCalls = [];
+    mocks.getFeedStatusSummary.mockReset();
+    mocks.getFeedStatusSummary.mockResolvedValue({ delivering: 71, total: 96 });
+    mocks.getWeekArchiveClusters.mockReset();
+    mocks.getWeekArchiveClusters.mockResolvedValue({
+      rows: [{ id: "cl-1" }],
+      truncated: false,
+    });
+  });
+
+  it("asks for the members of the displayed rows only, once, sorted", async () => {
+    await renderWeek(closed);
+
+    expect(mocks.wireCalls).toEqual([["bs-i", "bs-m"]]);
+  });
+
+  it.each([
+    ["the week in progress", () => current],
+    ["a closed week", () => closed],
+  ])("%s prints the distinct-text count and the cue on a wire row only", async (_label, key) => {
+    // bs-i: 21 members voted, but they are 4 distinct texts.
+    mocks.wireSignals = { "bs-i": { effectiveArticleCount: 4, memberCount: 21 } };
+
+    const text = await renderWeek(key());
+
+    expect(text).toContain("Spektrumda yalnızca İktidar · 4 kaynak · 21 sınıflandırılmış");
+    expect(text).toContain("Ajans ağırlıklı · 21 haber, 4 farklı metin");
+    expect(text).not.toContain("İktidar · 21 kaynak");
+    expect(text).toContain("Spektrumda yalnızca Muhalefet · 8 kaynak");
+    expect(text.match(/Ajans ağırlıklı|Tek kaynaktan dağıtıldı/g) ?? []).toHaveLength(1);
+  });
+
+  it("a failed member read fails open: every row prints as before", async () => {
+    mocks.wireSignals = null;
+
+    const text = await renderWeek(closed);
+
+    expect(text).toContain("Spektrumda yalnızca İktidar · 21 kaynak");
+    expect(text).toContain("Spektrumda yalnızca Muhalefet · 8 kaynak");
+    expect(text).not.toContain("Ajans ağırlıklı");
+    expect(text).not.toContain("Tek kaynaktan dağıtıldı");
+  });
+
+  it("does not read members when the week could not be read", async () => {
+    mocks.getWeekArchiveClusters.mockResolvedValue(null);
+
+    await renderWeek(closed);
+
+    expect(mocks.wireCalls).toEqual([]);
   });
 });
 

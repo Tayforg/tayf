@@ -105,7 +105,23 @@ export interface WeeklyLabelChange {
   changedAt: string;
 }
 
-export interface WeeklyTopCluster {
+/**
+ * h208-roadmap-1: the wire verdict of a displayed row, attached after
+ * `summariseWeek` by `attachWeeklyWire` (weekly-wire.ts) from a bounded member
+ * read. Present only on a wire redistribution's row, never `false`, so every
+ * other row is exactly the shape it always was; absent when the member read
+ * failed (the row then prints the plain "N kaynak"). `effectiveArticleCount` is
+ * the distinct texts the cluster page prints as "N kaynak"; `memberCount` is the
+ * de-duplicated member count `wireBadgeLabel` names ("6 haber, 3 farklı metin").
+ * `articleCount` stays the stored member count.
+ */
+export interface WeeklyRowWire {
+  isWire?: true;
+  effectiveArticleCount?: number;
+  memberCount?: number;
+}
+
+export interface WeeklyTopCluster extends WeeklyRowWire {
   id: string;
   title: string;
   /** Every member of the cluster, aggregator and niche feeds included. */
@@ -119,7 +135,7 @@ export interface WeeklyTopCluster {
   zoneCounts: Record<MediaDnaZone, number>;
 }
 
-export interface WeeklyBlindspot {
+export interface WeeklyBlindspot extends WeeklyRowWire {
   id: string;
   title: string;
   /** Every member of the cluster, aggregator and niche feeds included. */

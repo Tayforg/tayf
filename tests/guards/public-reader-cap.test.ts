@@ -34,6 +34,7 @@ const CAPPED_FILES = [
   "src/lib/story-threads/public-query.ts",
   "src/lib/weekly/weekly-query.ts",
   "src/lib/weekly/week-archive.ts",
+  "src/lib/weekly/weekly-wire-query.ts",
   "src/lib/weekly/distinctive-words-query.ts",
   "src/app/api/v1/sources/route.ts",
   "src/app/api/v1/sources/[slug]/profile/route.ts",
@@ -59,8 +60,8 @@ const PLAIN_CALL = /\bcreateServerClient\s*\(/;
 const CAPPED_CALL = /\bcreateReaderClient\s*\(/;
 
 describe("public reader files keep the capped client", () => {
-  it("lists exactly the 17 files the wave covers", () => {
-    expect(new Set(CAPPED_FILES).size).toBe(17);
+  it("lists exactly the 18 files the wave covers", () => {
+    expect(new Set(CAPPED_FILES).size).toBe(18);
   });
 
   it.each(CAPPED_FILES)("%s exists (the sweep is not vacuous)", (rel) => {

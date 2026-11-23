@@ -3,11 +3,14 @@ import Link from "next/link";
 import { BIAS_LABELS, ZONE_META } from "@/lib/bias/config";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import { zoneYieldDenominator, type ZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
+import { wireSourceCountHead } from "@/lib/feeds/zone-line";
 import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
 import { blindspotTallyLine, weekCopy, weekCopyFor } from "@/lib/weekly/week-copy";
 import {
   WEEKLY_CLUSTER_LIMIT,
   type WeeklyBlindspot,
+  type WeeklyRowWire,
   type WeeklySummary,
 } from "@/lib/weekly/weekly-query";
 import type { MediaDnaZone } from "@/types";
@@ -183,6 +186,56 @@ export function weeklySourceCount(
     : `${head} (${formatCountTr(voting)} sınıflandırılmış)`;
 }
 
+/**
+ * h208-roadmap-1: the row's wire verdict counts only with a text count that can
+ * be printed, as in the blindspots feed (`isWire === true` and a positive
+ * `effectiveArticleCount`). A flag without one is a plain row.
+ */
+function wireTextsOf(row: WeeklyRowWire): number | null {
+  const effective = row.effectiveArticleCount;
+  return row.isWire === true && effective !== undefined && effective > 0
+    ? effective
+    : null;
+}
+
+/**
+ * A row's "N kaynak": `weeklySourceCount` for every row, except a wire
+ * redistribution, which counts its DISTINCT TEXTS and names the classified votes
+ * when they outnumber them ("3 kaynak · 6 sınıflandırılmış"): the very
+ * `wireSourceCountHead` call /rss.xml, the blindspots feed, the digest and the
+ * cluster page's share surfaces make. A row with no verdict (the common case,
+ * and every row when the member read failed) is `weeklySourceCount`, byte for
+ * byte.
+ */
+export function weeklyRowSourceCount(
+  total: number,
+  counts: Record<MediaDnaZone, number>,
+  row: WeeklyRowWire,
+): string {
+  const effective = wireTextsOf(row);
+  return effective === null
+    ? weeklySourceCount(total, counts)
+    : wireSourceCountHead(effective, counts, true);
+}
+
+/**
+ * The wire cue a wire row carries beside its count ("Ajans ağırlıklı · 6 haber,
+ * 3 farklı metin", or "Tek kaynaktan dağıtıldı · 5 kopya" for one text): the
+ * `wireBadgeLabel` every other surface prints. `null` for a plain row.
+ */
+export function weeklyWireCue(row: WeeklyRowWire): string | null {
+  const effective = wireTextsOf(row);
+  const members = row.memberCount;
+  if (effective === null || members === undefined || !(members > 0)) return null;
+  return wireBadgeLabel(members, effective);
+}
+
+/** The wire cue as a meta chip beside the row's count; nothing for a plain row. */
+function WireCue({ row }: { row: WeeklyRowWire }) {
+  const cue = weeklyWireCue(row);
+  return cue === null ? null : <span className={metaClass}>{cue}</span>;
+}
+
 export function WidestSpectrum({
   summary,
   archive = false,
@@ -207,8 +260,9 @@ export function WidestSpectrum({
                 {cluster.title}
               </Link>
               <span className={metaClass}>
-                {`${weeklySourceCount(cluster.articleCount, cluster.zoneCounts)} · ${cluster.zonesCovered} bölge`}
+                {`${weeklyRowSourceCount(cluster.articleCount, cluster.zoneCounts, cluster)} · ${cluster.zonesCovered} bölge`}
               </span>
+              <WireCue row={cluster} />
             </li>
           ))}
         </ul>
@@ -228,7 +282,7 @@ export function WidestSpectrum({
  */
 export function blindspotShareText(blindspot: WeeklyBlindspot): string {
   const zone = ZONE_META[blindspot.side].label;
-  const count = weeklySourceCount(blindspot.articleCount, blindspot.counts);
+  const count = weeklyRowSourceCount(blindspot.articleCount, blindspot.counts, blindspot);
 
   if (blindspot.share === 1) return `Spektrumda yalnızca ${zone} · ${count}`;
   if (blindspot.share === null || blindspot.sharePct === null) {
@@ -269,6 +323,7 @@ export function Blindspots({
                 {blindspot.title}
               </Link>
               <span className={metaClass}>{blindspotShareText(blindspot)}</span>
+              <WireCue row={blindspot} />
             </li>
           ))}
         </ul>

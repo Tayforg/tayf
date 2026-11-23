@@ -2,7 +2,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ZoneHealth } from "@/lib/clusters/feed-health";
-import { sourceCountHead } from "@/lib/feeds/zone-line";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
+import { sourceCountHead, wireSourceCountHead } from "@/lib/feeds/zone-line";
 import type { MediaDnaZone } from "@/types";
 import type { WeeklyBlindspot, WeeklySummary } from "@/lib/weekly/weekly-query";
 
@@ -18,7 +19,9 @@ import {
   WidestSpectrum,
   ZoneShares,
   blindspotShareText,
+  weeklyRowSourceCount,
   weeklySourceCount,
+  weeklyWireCue,
 } from "./week-sections";
 
 // The sections are plain synchronous components, so renderToStaticMarkup is
@@ -605,5 +608,119 @@ describe("variant=\"rolling\" (/hafta)", () => {
 
     expect(zones).toContain("O hafta kim neyi öne çıkardı");
     expect(zones).toContain("(haftanın 10 kaynak kaydı içinde)");
+  });
+});
+
+// h208-roadmap-1: a wire redistribution counts its distinct texts on every
+// surface, /hafta included. The row carries the verdict (weekly-wire.ts) and
+// prints what /rss.xml and the blindspots feed print: wireSourceCountHead for
+// the count, wireBadgeLabel for the cue. A row without it is untouched.
+describe("weeklyRowSourceCount / weeklyWireCue (h208-roadmap-1)", () => {
+  // 6 members, 6 voters, 3 distinct texts: the votes outnumber the texts.
+  const VOTES = { iktidar: 4, bagimsiz: 1, muhalefet: 1 };
+  const WIRE = { isWire: true as const, effectiveArticleCount: 3, memberCount: 6 };
+
+  it("a wire row prints wireSourceCountHead(effective, counts, true), byte for byte", () => {
+    expect(weeklyRowSourceCount(6, VOTES, WIRE)).toBe(wireSourceCountHead(3, VOTES, true));
+    expect(weeklyRowSourceCount(6, VOTES, WIRE)).toBe("3 kaynak · 6 sınıflandırılmış");
+  });
+
+  it("a wire row whose votes do not outnumber its texts keeps the plain head of the effective count", () => {
+    expect(weeklyRowSourceCount(6, { iktidar: 2, bagimsiz: 0, muhalefet: 0 }, WIRE)).toBe(
+      "3 kaynak (2 sınıflandırılmış)",
+    );
+  });
+
+  it("a plain row (no verdict) prints exactly weeklySourceCount", () => {
+    expect(weeklyRowSourceCount(13, { iktidar: 13, bagimsiz: 0, muhalefet: 0 }, {})).toBe("13 kaynak");
+    expect(weeklyRowSourceCount(53, { iktidar: 30, bagimsiz: 6, muhalefet: 10 }, {})).toBe(
+      weeklySourceCount(53, { iktidar: 30, bagimsiz: 6, muhalefet: 10 }),
+    );
+    expect(weeklyRowSourceCount(1200, { iktidar: 600, bagimsiz: 100, muhalefet: 100 }, {})).toBe(
+      "1.200 kaynak (800 sınıflandırılmış)",
+    );
+  });
+
+  it("a wire flag without a usable text count falls back to the plain head and no cue", () => {
+    for (const effectiveArticleCount of [0, -1, Number.NaN, undefined]) {
+      const row = { isWire: true as const, effectiveArticleCount, memberCount: 6 };
+      expect(weeklyRowSourceCount(6, VOTES, row)).toBe(weeklySourceCount(6, VOTES));
+      expect(weeklyWireCue(row)).toBeNull();
+    }
+    // The count alone, without the flag, is not a verdict either.
+    expect(weeklyRowSourceCount(6, VOTES, { effectiveArticleCount: 3, memberCount: 6 })).toBe(
+      weeklySourceCount(6, VOTES),
+    );
+  });
+
+  it("the cue is wireBadgeLabel(memberCount, effective): several texts, or a single dispatch", () => {
+    expect(weeklyWireCue(WIRE)).toBe(wireBadgeLabel(6, 3));
+    expect(weeklyWireCue(WIRE)).toBe("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+    expect(weeklyWireCue({ isWire: true, effectiveArticleCount: 1, memberCount: 5 })).toBe(
+      "Tek kaynaktan dağıtıldı · 5 kopya",
+    );
+  });
+
+  it("a plain row has no cue", () => {
+    expect(weeklyWireCue({})).toBeNull();
+  });
+});
+
+describe("wire rows on the /hafta lists (h208-roadmap-1)", () => {
+  const WIRE = { isWire: true as const, effectiveArticleCount: 3, memberCount: 6 };
+
+  it("<WidestSpectrum> prints the distinct-text count and the cue for a wire row, the old line for a plain one", () => {
+    const summary: WeeklySummary = {
+      ...summaryWith([]),
+      topClusters: [
+        {
+          id: "wire-1",
+          title: "Ajans haberi",
+          articleCount: 6,
+          zonesCovered: 3,
+          zoneCounts: { iktidar: 4, bagimsiz: 1, muhalefet: 1 },
+          ...WIRE,
+        },
+        {
+          id: "plain-1",
+          title: "Bağımsız haber",
+          articleCount: 9,
+          zonesCovered: 3,
+          zoneCounts: { iktidar: 4, bagimsiz: 3, muhalefet: 2 },
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<WidestSpectrum summary={summary} variant="rolling" />);
+
+    expect(html).toContain("3 kaynak · 6 sınıflandırılmış · 3 bölge");
+    expect(html).toContain("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+    expect(html).not.toContain("6 kaynak");
+    // The plain row is the line it always was, and says nothing about wire.
+    expect(html).toContain("9 kaynak · 3 bölge");
+    expect(html.match(/Ajans ağırlıklı/g) ?? []).toHaveLength(1);
+  });
+
+  it("<Blindspots> and blindspotShareText print the same count and cue for a wire claim", () => {
+    const wireClaim = blindspot({
+      id: "wire-bs",
+      title: "Ajans kör noktası",
+      articleCount: 6,
+      share: 1,
+      sharePct: 100,
+      counts: { iktidar: 6, bagimsiz: 0, muhalefet: 0 },
+      ...WIRE,
+    });
+    const plainClaim = blindspot({ id: "plain-bs", title: "Düz kör nokta", articleCount: 13 });
+
+    expect(blindspotShareText(wireClaim)).toBe("Spektrumda yalnızca İktidar · 3 kaynak · 6 sınıflandırılmış");
+    expect(blindspotShareText(plainClaim)).toBe("Spektrumda yalnızca İktidar · 13 kaynak");
+
+    const html = renderToStaticMarkup(
+      <Blindspots summary={summaryWith([wireClaim, plainClaim])} health={null} />,
+    );
+    expect(html).toContain("Spektrumda yalnızca İktidar · 3 kaynak · 6 sınıflandırılmış");
+    expect(html).toContain("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+    expect(html).toContain("Spektrumda yalnızca İktidar · 13 kaynak<");
+    expect(html.match(/Ajans ağırlıklı/g) ?? []).toHaveLength(1);
   });
 });
